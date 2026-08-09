@@ -1,10 +1,8 @@
-Enterimport os
+import os
 import sqlite3
 import logging
 import asyncio
 import warnings
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,21 +15,6 @@ from telegram.warnings import PTBUserWarning
 warnings.filterwarnings("ignore", category=PTBUserWarning)
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- سيرفر ويب مصغر لإبقاء Render سعيداً ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"B-Fix Bot is Running Perfectly!")
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
-
-# تشغيل السيرفر المصغر في المسار الخلفي
-threading.Thread(target=run_health_server, daemon=True).start()
-
 # ================= (1) الإعدادات =================
 BOT_TOKEN = "8299192931:AAHkXI_BLyoAp8TvrSCU9i_CnoDSyDFbTGA"
 ADMIN_ID = 8218627841  # استبدله بـ ID الخاص بك 
@@ -39,6 +22,7 @@ ADMIN_ID = 8218627841  # استبدله بـ ID الخاص بك
 WHATSAPP_LINK = "https://iwtsp.com/967777728478"
 SUPPORT_LINK = "https://t.me/bfixSoftware"
 DB_NAME = "bfix_store.db"
+RENDER_URL = "https://b-fix-bot.onrender.com"  # هذا هو رابط الاستضافة الخاص بك
 
 (ADMIN_USER_ID, ADMIN_AMOUNT, ADMIN_SEARCH, ADMIN_BROADCAST, ADMIN_SRV_CATEGORY,
  ADMIN_SRV_NAME, ADMIN_SRV_DESC, ADMIN_SRV_PRICE, ADMIN_SRV_DURATION, 
@@ -241,7 +225,7 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         db_execute("DELETE FROM product_keys WHERE service_id = ?", (srv_id,))
         await query.message.edit_text("✅ تم الحذف بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 إدارة الخدمات 🔄", callback_data="adm_srv_menu")]]))
 
-# ================= (5) معالجات المحادثة =================
+# ================= (5) معالجات المحادثة الصارمة =================
 async def user_charge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.edit_text("💳 أرسل **كود البطاقة** الآن (أو أرسل /cancel للإلغاء):", parse_mode='Markdown')
@@ -414,7 +398,7 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚫 تم الإلغاء بنجاح.")
     return ConversationHandler.END
 
-# ================= (6) التشغيل الرئيسي =================
+# ================= (6) التشغيل الرئيسي بنظام WEBHOOK =================
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -451,8 +435,15 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_menus_handler, pattern="^(adm_|delsrv_)"))
     app.add_handler(CallbackQueryHandler(main_buttons_handler))
 
-    print("\n✅ البوت يعمل الآن لـ Render.com بنجاح! اضغط Ctrl+C للإيقاف.")
-    app.run_polling()
+    # التعديل السحري: الاعتماد على Webhook ليقبله Render فوراً
+    PORT = int(os.environ.get('PORT', 8080))
+    print(f"\n✅ جاري تشغيل البوت بنظام Webhook على المنفذ {PORT}...")
+    
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=RENDER_URL
+    )
 
 if __name__ == '__main__':
     try:
