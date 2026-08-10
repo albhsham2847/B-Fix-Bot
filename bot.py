@@ -94,16 +94,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━"
     )
     keyboard = [
-        [InlineKeyboardButton("💠 الخدمات الرقمية ✨", callback_data="show_cat_digital"),
-         InlineKeyboardButton("🔵 الاشتراكات 🚀", callback_data="show_cat_subscriptions")],
-        [InlineKeyboardButton("🔧 خدمة إيجار الأدوات 🛠️", callback_data="show_cat_rentals")],
-        [InlineKeyboardButton("📦 سجل طلباتي 🔄", callback_data="my_orders"),
-         InlineKeyboardButton("👤 حسابي ⚡", callback_data="my_profile")],
-        [InlineKeyboardButton("💳 شحن الرصيد بكود", callback_data="charge_account"),
-         InlineKeyboardButton("💳 تغذية حسابك", callback_data="fund_account")],
-        [InlineKeyboardButton("💬 واتساب 🌐", url=WHATSAPP_LINK),
-         InlineKeyboardButton("👨‍💻 الدعم 🛠️", url=SUPPORT_LINK)],
-        [InlineKeyboardButton("ℹ️ معلومات البوت 💠", callback_data="bot_info")]
+        [InlineKeyboardButton("🟢 الخدمات الرقمية ✨", callback_data="show_cat_digital"),
+         InlineKeyboardButton("🟢 الاشتراكات 🚀", callback_data="show_cat_subscriptions")],
+        [InlineKeyboardButton("🟢 خدمة إيجار الأدوات 🛠️", callback_data="show_cat_rentals")],
+        [InlineKeyboardButton("🔵 سجل طلباتي 🔄", callback_data="my_orders"),
+         InlineKeyboardButton("🔵 حسابي ⚡", callback_data="my_profile")],
+        [InlineKeyboardButton("🟢 شحن الرصيد بكود", callback_data="charge_account"),
+         InlineKeyboardButton("🟢 تغذية حسابك", callback_data="fund_account")],
+        [InlineKeyboardButton("🔵 واتساب 🌐", url=WHATSAPP_LINK),
+         InlineKeyboardButton("🔵 الدعم 🛠️", url=SUPPORT_LINK)],
+        [InlineKeyboardButton("🔴 معلومات البوت ℹ️", callback_data="bot_info")]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     if update.message: await update.message.reply_text(text, reply_markup=markup, parse_mode='Markdown')
@@ -118,14 +118,12 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if data == "my_profile":
         user_info = db_fetch_one("SELECT name, balance FROM users WHERE user_id = ?", (user_id,))
         text = f"👤 **ملفك الشخصي:**\n\n▪️ **الاسم:** {user_info[0]}\n▪️ **الآيدي:** `{user_id}`\n▪️ **الرصيد:** `{user_info[1]}` $\n\nلزيادة رصيدك اضغط تغذية حسابك."
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 تغذية حسابك", callback_data="fund_account")], [InlineKeyboardButton("🔙 رجوع 🔄", callback_data="main_menu")]]), parse_mode='Markdown')
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 تغذية حسابك", callback_data="fund_account")], [InlineKeyboardButton("🔴 رجوع للقائمة الرئيسية 🔄", callback_data="main_menu")]]), parse_mode='Markdown')
 
-    # زر شحن الرصيد بكود القديم
     elif data == "charge_account":
         await query.message.edit_text("💳 أرسل **كود البطاقة** الآن (أو أرسل /cancel للإلغاء):", parse_mode='Markdown')
         context.user_data['waiting_card'] = True
 
-    # الزر الجديد: تغذية حسابك (طرق الدفع)
     elif data == "fund_account":
         payment_text = (
             "💳 **اختر وسيلة الدفع المناسبة لك لتغذية حسابك:**\n\n"
@@ -138,12 +136,11 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
              InlineKeyboardButton("🏦 بنك الكريمي", callback_data="pay_kuraimi")],
             [InlineKeyboardButton("🟡 Binance", callback_data="pay_binance"),
              InlineKeyboardButton("💳 VISA", callback_data="pay_visa")],
-            [InlineKeyboardButton("🎟 شحن بكود", callback_data="charge_account")],
-            [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية 🔄", callback_data="main_menu")]
+            [InlineKeyboardButton("🟢 شحن بكود", callback_data="charge_account")],
+            [InlineKeyboardButton("🔴 رجوع للقائمة الرئيسية 🔄", callback_data="main_menu")]
         ]
         await query.message.edit_text(payment_text, reply_markup=InlineKeyboardMarkup(payment_keyboard), parse_mode='Markdown')
 
-    # رسالة بيانات التحويل عند الضغط على أي وسيلة دفع في تغذية الحساب
     elif data.startswith("pay_"):
         payment_details = (
             "💳 **طرق الدفع المتاحة لدينا**\n\n"
@@ -169,9 +166,9 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "🔒 دفع آمن • تفعيل سريع • خدمة موثوقة"
         )
         back_kb = [
-            [InlineKeyboardButton("💬 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)],
-            [InlineKeyboardButton("🔙 العودة لطرق الدفع", callback_data="fund_account")],
-            [InlineKeyboardButton("🏠 الرئيسية", callback_data="main_menu")]
+            [InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)],
+            [InlineKeyboardButton("🔵 العودة لطرق الدفع", callback_data="fund_account")],
+            [InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]
         ]
         await query.message.edit_text(payment_details, reply_markup=InlineKeyboardMarkup(back_kb), parse_mode='Markdown')
 
@@ -184,15 +181,15 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         
         services = db_fetch_all("SELECT id, name, price FROM services WHERE category = ?", (category,))
         if not services:
-            await query.message.edit_text(f"🚧 لا توجد خدمات في قسم {title} حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للقائمة 🔄", callback_data="main_menu")]]))
+            await query.message.edit_text(f"🚧 لا توجد خدمات في قسم {title} حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 العودة للقائمة 🔄", callback_data="main_menu")]]))
             return
             
         keyboard = []
         for srv in services:
             stock = db_fetch_one("SELECT COUNT(*) FROM product_keys WHERE service_id = ? AND is_sold = 0", (srv[0],))[0]
-            status = "🟢" if stock > 0 else "🔴 نفدت"
+            status = "🟢 تتوفر" if stock > 0 else "🔴 نفدت"
             keyboard.append([InlineKeyboardButton(f"▪️ {srv[1]} - {srv[2]}$ ({status})", callback_data=f"srv_{srv[0]}")])
-        keyboard.append([InlineKeyboardButton("🔙 العودة للقائمة 🔄", callback_data="main_menu")])
+        keyboard.append([InlineKeyboardButton("🔴 العودة للقائمة 🔄", callback_data="main_menu")])
         await query.message.edit_text(f"📑 **{title}:**\n\n👇 اختر الخدمة لعرض التفاصيل:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data.startswith("srv_"):
@@ -201,7 +198,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         stock = db_fetch_one("SELECT COUNT(*) FROM product_keys WHERE service_id = ? AND is_sold = 0", (srv_id,))[0]
         text = f"📌 **الخدمة:** {srv[1]}\n📝 **الوصف:** {srv[2]}\n⏳ **المدة:** {srv[4]}\n💵 **السعر:** `{srv[3]}` $\n📦 **الكمية المتوفرة:** {stock}"
         
-        keyboard = [[InlineKeyboardButton("✅ شراء الآن ⚡", callback_data=f"buy_{srv[0]}")], [InlineKeyboardButton("🔙 رجوع للقسم 🔄", callback_data=f"show_cat_{srv[5]}")]]
+        keyboard = [[InlineKeyboardButton("🟢 شراء الآن ⚡", callback_data=f"buy_{srv[0]}")], [InlineKeyboardButton("🔴 رجوع للقسم 🔄", callback_data=f"show_cat_{srv[5]}")]]
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data.startswith("buy_"):
@@ -212,7 +209,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         
         if not stock_key:
             out_of_stock_msg = "❌ **عذراً، لقد نفدت الكمية (الأكواد) لهذه الخدمة للتو!**\n\nيرجى المحاولة لاحقاً أو مراسلة الدعم الفني."
-            await query.message.edit_text(out_of_stock_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للخدمات", callback_data="main_menu")]]), parse_mode='Markdown')
+            await query.message.edit_text(out_of_stock_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 العودة للخدمات", callback_data="main_menu")]]), parse_mode='Markdown')
             return
             
         if user_info[0] >= srv[0]:
@@ -222,7 +219,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             db_execute("INSERT INTO orders (user_id, service_id, status, order_date) VALUES (?, ?, 'مكتمل ✅', ?)", (user_id, srv_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             
             success_msg = "✅ **تم الشراء بنجاح!**\n\n🎁 تم إرسال معلومات اشتراكك في الرسالة التالية لتتمكن من نسخها بسهولة 👇"
-            await query.message.edit_text(success_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
+            await query.message.edit_text(success_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
             
             await context.bot.send_message(chat_id=user_id, text=stock_key[1])
             await context.bot.send_message(chat_id=user_id, text="🌟 **شكراً لاستخدامك بوت Bfixsoftware** 🌟", parse_mode='Markdown')
@@ -237,15 +234,14 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         orders = db_fetch_all("SELECT s.name, o.status, o.order_date FROM orders o JOIN services s ON o.service_id = s.id WHERE o.user_id = ? ORDER BY o.id DESC LIMIT 5", (user_id,))
         if not orders: text = "📦 لا توجد طلبات."
         else: text = "📦 **آخر 5 طلبات:**\n\n" + "\n".join([f"▪️ **{o[0]}**\nالحالة: {o[1]}\nالتاريخ: {o[2]}\n" for o in orders])
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]]), parse_mode='Markdown')
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع للقائمة", callback_data="main_menu")]]), parse_mode='Markdown')
 
     elif data == "bot_info":
-        await query.message.edit_text("🤖 متجر B-Fix الذكي للخدمات والاشتراكات.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]]))
+        await query.message.edit_text("🤖 متجر B-Fix الذكي للخدمات والاشتراكات.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع", callback_data="main_menu")]]))
 
     elif data == "main_menu":
         await start_command(update, context)
 
-# استقبال كود الشحن النصي المباشر
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('waiting_card'):
         code = update.message.text.strip()
@@ -268,10 +264,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return 
     text = "👑 **لوحة تحكم المطور**"
     keyboard = [
-        [InlineKeyboardButton("➕ إضافة رصيد 🔵", callback_data="adm_add_bal"), InlineKeyboardButton("➖ خصم رصيد 🔴", callback_data="adm_sub_bal")],
-        [InlineKeyboardButton("🎟 إنشاء كود شحن 💠", callback_data="adm_new_card"), InlineKeyboardButton("🔍 بحث 🔎", callback_data="adm_search")],
-        [InlineKeyboardButton("📦 إدارة الخدمات والأكواد 🛠️", callback_data="adm_srv_menu")],
-        [InlineKeyboardButton("📢 إشعار جماعي 🌐", callback_data="adm_broadcast"), InlineKeyboardButton("📊 إحصائيات 📈", callback_data="adm_stats")]
+        [InlineKeyboardButton("🟢 إضافة رصيد 🔵", callback_data="adm_add_bal"), InlineKeyboardButton("🔴 خصم رصيد 🔴", callback_data="adm_sub_bal")],
+        [InlineKeyboardButton("🟢 إنشاء كود شحن 🎟", callback_data="adm_new_card"), InlineKeyboardButton("🔵 بحث 🔎", callback_data="adm_search")],
+        [InlineKeyboardButton("🟢 إدارة الخدمات والأكواد 🛠️", callback_data="adm_srv_menu")],
+        [InlineKeyboardButton("🔵 إشعار جماعي 📢", callback_data="adm_broadcast"), InlineKeyboardButton("🔴 إحصائيات 📊", callback_data="adm_stats")]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     if update.message: await update.message.reply_text(text, reply_markup=markup)
@@ -290,20 +286,20 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         o_count = db_fetch_one("SELECT COUNT(*) FROM orders")[0]
         k_count = db_fetch_one("SELECT COUNT(*) FROM product_keys WHERE is_sold = 0")[0]
         text = f"📊 **إحصائيات:**\n👥 مستخدمين: `{u_count}`\n📦 طلبات: `{o_count}`\n🔑 أكواد متوفرة: `{k_count}`"
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")]]), parse_mode='Markdown')
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع لوحة التحكم", callback_data="adm_main")]]), parse_mode='Markdown')
     elif data == "adm_srv_menu":
         keyboard = [
-            [InlineKeyboardButton("➕ إضافة خدمة جديدة", callback_data="adm_add_srv")],
-            [InlineKeyboardButton("🔑 شحن أكواد لخدمة", callback_data="adm_stock_list")],
-            [InlineKeyboardButton("✏️ تعديل سعر خدمة", callback_data="adm_edit_prc_list")],
-            [InlineKeyboardButton("🗑 حذف خدمة", callback_data="adm_del_srv_list")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")]
+            [InlineKeyboardButton("🟢 إضافة خدمة جديدة", callback_data="adm_add_srv")],
+            [InlineKeyboardButton("🔵 شحن أكواد لخدمة", callback_data="adm_stock_list")],
+            [InlineKeyboardButton("🔵 تعديل سعر خدمة", callback_data="adm_edit_prc_list")],
+            [InlineKeyboardButton("🔴 حذف خدمة", callback_data="adm_del_srv_list")],
+            [InlineKeyboardButton("🔴 رجوع لوحة التحكم", callback_data="adm_main")]
         ]
         await query.message.edit_text("📦 **إدارة الخدمات:**", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data in ["adm_del_srv_list", "adm_edit_prc_list", "adm_stock_list"]:
         services = db_fetch_all("SELECT id, name, category FROM services")
         if not services:
-            await query.message.edit_text("لا توجد خدمات مضافة حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="adm_srv_menu")]]))
+            await query.message.edit_text("لا توجد خدمات مضافة حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع", callback_data="adm_srv_menu")]]))
             return
         if data == "adm_del_srv_list": pref, action = "delsrv_", "حذف"
         elif data == "adm_edit_prc_list": pref, action = "editprc_", "تعديل سعر"
@@ -316,13 +312,13 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             else: cat_icon = "🔧"
             keyboard.append([InlineKeyboardButton(f"{cat_icon} {s[1]}", callback_data=f"{pref}{s[0]}")])
         
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="adm_srv_menu")])
+        keyboard.append([InlineKeyboardButton("🔴 رجوع", callback_data="adm_srv_menu")])
         await query.message.edit_text(f"اختر الخدمة لـ {action}:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("delsrv_"):
         srv_id = int(data.split("_")[1])
         db_execute("DELETE FROM services WHERE id = ?", (srv_id,))
         db_execute("DELETE FROM product_keys WHERE service_id = ?", (srv_id,))
-        await query.message.edit_text("✅ تم الحذف بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 إدارة الخدمات", callback_data="adm_srv_menu")]]))
+        await query.message.edit_text("✅ تم الحذف بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 إدارة الخدمات", callback_data="adm_srv_menu")]]))
 
 # ================= (5) معالجات المحادثة للإدارة =================
 async def admin_conv_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -346,7 +342,7 @@ async def admin_conv_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💠 قسم الخدمات الرقمية (Software)", callback_data="cat_digital")],
             [InlineKeyboardButton("🔵 قسم الاشتراكات (AI)", callback_data="cat_subscriptions")],
             [InlineKeyboardButton("🔧 قسم إيجار الأدوات", callback_data="cat_rentals")],
-            [InlineKeyboardButton("🚫 إلغاء", callback_data="cat_cancel")]
+            [InlineKeyboardButton("🔴 إلغاء", callback_data="cat_cancel")]
         ])
         await query.message.edit_text("➕ **إضافة خدمة جديدة:**\n\nأين تريد وضع هذه الخدمة؟ اختر القسم المناسب:", reply_markup=markup)
         return ADMIN_SRV_CATEGORY
@@ -516,10 +512,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_menus_handler, pattern="^(adm_|delsrv_)"))
     app.add_handler(CallbackQueryHandler(main_buttons_handler))
     
-    # معالج الرسائل النصية العامة
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 
-    print("\n✅ البوت جاهز ويعمل الآن بقوة! (الرجاء التجربة في تيليجرام)")
+    print("\n✅ البوت جاهز ويعمل الآن بقوة بالألوان الجديدة!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
@@ -529,4 +524,3 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         print("\nتم إيقاف البوت.")
-
