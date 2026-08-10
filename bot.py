@@ -96,6 +96,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("💠 الخدمات الرقمية ✨", callback_data="show_cat_digital"),
          InlineKeyboardButton("🔵 الاشتراكات 🚀", callback_data="show_cat_subscriptions")],
+        [InlineKeyboardButton("🔧 خدمة إيجار الأدوات 🛠️", callback_data="show_cat_rentals")],
         [InlineKeyboardButton("📦 سجل طلباتي 🔄", callback_data="my_orders"),
          InlineKeyboardButton("👤 حسابي ⚡", callback_data="my_profile")],
         [InlineKeyboardButton("💳 شحن الرصيد بكود 🟦", callback_data="charge_account")],
@@ -120,7 +121,16 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elif data.startswith("show_cat_"):
         category = data.replace("show_cat_", "")
-        title = "💠 الخدمات الرقمية (Software & Tools) ✨" if category == "digital" else "🔵 الاشتراكات (AI & Premium) 🚀"
+        
+        # تحديد اسم القسم بناءً على الاختيار
+        if category == "digital":
+            title = "💠 الخدمات الرقمية (Software & Tools) ✨"
+        elif category == "subscriptions":
+            title = "🔵 الاشتراكات (AI & Premium) 🚀"
+        elif category == "rentals":
+            title = "🔧 خدمة إيجار الأدوات 🛠️"
+        else:
+            title = "🛒 قائمة الخدمات"
         
         services = db_fetch_all("SELECT id, name, price FROM services WHERE category = ?", (category,))
         if not services:
@@ -233,7 +243,11 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         keyboard = []
         for s in services:
-            cat_icon = "💠" if s[2] == "digital" else "🔵"
+            # تحديد الأيقونة حسب القسم
+            if s[2] == "digital": cat_icon = "💠"
+            elif s[2] == "subscriptions": cat_icon = "🔵"
+            else: cat_icon = "🔧"
+            
             keyboard.append([InlineKeyboardButton(f"{cat_icon} {s[1]}", callback_data=f"{pref}{s[0]}")])
         
         keyboard.append([InlineKeyboardButton("🔙 رجوع 🔄", callback_data="adm_srv_menu")])
@@ -244,7 +258,7 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         db_execute("DELETE FROM product_keys WHERE service_id = ?", (srv_id,))
         await query.message.edit_text("✅ تم الحذف بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 إدارة الخدمات 🔄", callback_data="adm_srv_menu")]]))
 
-# ================= (5) معالجات المحادثة =================
+# ================= (5) معالجات المحادثة الصارمة =================
 async def user_charge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.edit_text("💳 أرسل **كود البطاقة** الآن (أو أرسل /cancel للإلغاء):", parse_mode='Markdown')
@@ -285,6 +299,7 @@ async def admin_conv_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("💠 قسم الخدمات الرقمية (Software)", callback_data="cat_digital")],
             [InlineKeyboardButton("🔵 قسم الاشتراكات (AI)", callback_data="cat_subscriptions")],
+            [InlineKeyboardButton("🔧 قسم إيجار الأدوات", callback_data="cat_rentals")],
             [InlineKeyboardButton("🚫 إلغاء", callback_data="cat_cancel")]
         ])
         await query.message.edit_text("➕ **إضافة خدمة جديدة:**\n\nأين تريد وضع هذه الخدمة؟ اختر القسم المناسب:", reply_markup=markup)
@@ -414,19 +429,17 @@ async def adm_rx_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚫 تم الإلغاء بنجاح.")
+    if update.message: await update.message.reply_text("🚫 تم الإلغاء بنجاح.")
+    elif update.callback_query: await update.callback_query.answer("🚫 تم الإلغاء")
     return ConversationHandler.END
 
 # ================= (6) التشغيل الرئيسي =================
 def main():
     init_db()
     
-    # ⚠️ الكود السحري: يقوم بإجبار تيليجرام على حذف أي ارتباط قديم يعطل البوت
     try:
         urllib.request.urlopen(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook").read()
-        print("✅ تم تنظيف السيرفر من الارتباطات القديمة بنجاح.")
-    except Exception as e:
-        pass
+    except Exception: pass
         
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
@@ -436,7 +449,8 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(user_charge_start, pattern="^charge_account$")],
         states={USER_CARD_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, user_charge_receive)]},
-        fallbacks=[CommandHandler("cancel", cancel_handler)]
+        fallbacks=[CommandHandler("cancel", cancel_handler)],
+        allow_reentry=True
     ))
 
     app.add_handler(ConversationHandler(
@@ -456,14 +470,14 @@ def main():
             ADMIN_NEW_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_editprice)],
             ADMIN_STOCK_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_stock)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_handler)]
+        fallbacks=[CommandHandler("cancel", cancel_handler)],
+        allow_reentry=True
     ))
     
     app.add_handler(CallbackQueryHandler(admin_menus_handler, pattern="^(adm_|delsrv_)"))
     app.add_handler(CallbackQueryHandler(main_buttons_handler))
 
     print("\n✅ البوت جاهز ويعمل الآن بقوة! (الرجاء التجربة في تيليجرام)")
-    # استخدام drop_pending_updates لمسح أي رسائل معلقة قديمة
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
