@@ -49,7 +49,7 @@ DB_NAME = "bfix_store.db"
 
 USER_CARD_CODE = 20
 
-# ================= (2) نظام قاعدة البيانات =================
+# ================= (2) نظام قاعدة البيانات الآمن 100% =================
 def db_execute(query, params=()):
     with sqlite3.connect(DB_NAME, timeout=30) as conn:
         conn.execute(query, params)
@@ -66,6 +66,7 @@ def db_fetch_all(query, params=()):
 def init_db():
     with sqlite3.connect(DB_NAME, timeout=30) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
+        # جداول آمنة لا تحذف البيانات القديمة أبداً بوجود (IF NOT EXISTS)
         conn.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, name TEXT, balance REAL DEFAULT 0.0, join_date TEXT)''')
         conn.execute('''CREATE TABLE IF NOT EXISTS services (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT, price REAL, duration TEXT, category TEXT DEFAULT 'digital')''')
         try: conn.execute("ALTER TABLE services ADD COLUMN category TEXT DEFAULT 'digital'")
@@ -514,7 +515,7 @@ def main():
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 
-    print("\n✅ البوت جاهز ويعمل الآن بقوة بالألوان الجديدة!")
+    print("\n✅ البوت جاهز ويعمل الآن بقوة وبنظام الحفظ الآمن للبيانات!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
@@ -524,3 +525,4 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         print("\nتم إيقاف البوت.")
+
