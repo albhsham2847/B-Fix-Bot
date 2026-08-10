@@ -26,7 +26,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"B-Fix Bot is ALIVE and RUNNING 24/7!")
     def log_message(self, format, *args):
-        pass # لإبقاء الشاشة السوداء نظيفة للمطور
+        pass
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -99,7 +99,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔧 خدمة إيجار الأدوات 🛠️", callback_data="show_cat_rentals")],
         [InlineKeyboardButton("📦 سجل طلباتي 🔄", callback_data="my_orders"),
          InlineKeyboardButton("👤 حسابي ⚡", callback_data="my_profile")],
-        [InlineKeyboardButton("💳 شحن الرصيد بكود 🟦", callback_data="charge_account")],
+        [InlineKeyboardButton("💳 شحن الرصيد بكود", callback_data="charge_account"),
+         InlineKeyboardButton("💳 تغذية حسابك", callback_data="fund_account")],
         [InlineKeyboardButton("💬 واتساب 🌐", url=WHATSAPP_LINK),
          InlineKeyboardButton("👨‍💻 الدعم 🛠️", url=SUPPORT_LINK)],
         [InlineKeyboardButton("ℹ️ معلومات البوت 💠", callback_data="bot_info")]
@@ -116,21 +117,70 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data == "my_profile":
         user_info = db_fetch_one("SELECT name, balance FROM users WHERE user_id = ?", (user_id,))
-        text = f"👤 **ملفك الشخصي:**\n\n▪️ **الاسم:** {user_info[0]}\n▪️ **الآيدي:** `{user_id}`\n▪️ **الرصيد:** `{user_info[1]}` $\n\nلزيادة رصيدك اضغط شحن."
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 شحن بكود 🟦", callback_data="charge_account")], [InlineKeyboardButton("🔙 رجوع 🔄", callback_data="main_menu")]]), parse_mode='Markdown')
+        text = f"👤 **ملفك الشخصي:**\n\n▪️ **الاسم:** {user_info[0]}\n▪️ **الآيدي:** `{user_id}`\n▪️ **الرصيد:** `{user_info[1]}` $\n\nلزيادة رصيدك اضغط تغذية حسابك."
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 تغذية حسابك", callback_data="fund_account")], [InlineKeyboardButton("🔙 رجوع 🔄", callback_data="main_menu")]]), parse_mode='Markdown')
+
+    # زر شحن الرصيد بكود القديم
+    elif data == "charge_account":
+        await query.message.edit_text("💳 أرسل **كود البطاقة** الآن (أو أرسل /cancel للإلغاء):", parse_mode='Markdown')
+        context.user_data['waiting_card'] = True
+
+    # الزر الجديد: تغذية حسابك (طرق الدفع)
+    elif data == "fund_account":
+        payment_text = (
+            "💳 **اختر وسيلة الدفع المناسبة لك لتغذية حسابك:**\n\n"
+            "يرجى النقر على إحدى الطرق أدناه لعرض تفاصيل وحسابات التحويل المعتمدة 👇"
+        )
+        payment_keyboard = [
+            [InlineKeyboardButton("🔹 محفظة جيب", callback_data="pay_jeep"),
+             InlineKeyboardButton("🔹 جوالي", callback_data="pay_jawali")],
+            [InlineKeyboardButton("🔹 وان كاش", callback_data="pay_onecash"),
+             InlineKeyboardButton("🏦 بنك الكريمي", callback_data="pay_kuraimi")],
+            [InlineKeyboardButton("🟡 Binance", callback_data="pay_binance"),
+             InlineKeyboardButton("💳 VISA", callback_data="pay_visa")],
+            [InlineKeyboardButton("🎟 شحن بكود", callback_data="charge_account")],
+            [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية 🔄", callback_data="main_menu")]
+        ]
+        await query.message.edit_text(payment_text, reply_markup=InlineKeyboardMarkup(payment_keyboard), parse_mode='Markdown')
+
+    # رسالة بيانات التحويل عند الضغط على أي وسيلة دفع في تغذية الحساب
+    elif data.startswith("pay_"):
+        payment_details = (
+            "💳 **طرق الدفع المتاحة لدينا**\n\n"
+            "📱 **المحافظ الإلكترونية**\n"
+            "🔹 محفظة جيب: `580300`\n"
+            "🔹 وان كاش: `178109713`\n"
+            "🔹 جوالي: `777728478`\n\n"
+            "🏦 **التحويل البنكي – بنك الكريمي**\n\n"
+            "🇾🇪 الحساب بالريال اليمني: `3204168937`\n"
+            "🇸🇦 الحساب بالريال السعودي: `3204433991`\n"
+            "💵 الحساب بالدولار الأمريكي: `3191718649`\n\n"
+            "🌍 **طرق الدفع العالمية**\n\n"
+            "🟡 **Binance ID:**\n`1063050653`\n"
+            "💳 **VISA:**\n`4909800019663092`\n\n"
+            "━━━━━━━━━━━━━━\n\n"
+            "✅ **بعد إتمام عملية الدفع**\n\n"
+            "يرجى إرسال صورة أو إشعار التحويل عبر واتساب مع توضيح:\n"
+            "• **الاسم**\n"
+            "• **الخدمة المطلوبة**\n"
+            "• **المبلغ المحول**\n"
+            "• **وسيلة الدفع المستخدمة**\n\n"
+            "سيتم مراجعة عملية الدفع وتفعيل طلبك في أسرع وقت ممكن.\n\n"
+            "🔒 دفع آمن • تفعيل سريع • خدمة موثوقة"
+        )
+        back_kb = [
+            [InlineKeyboardButton("💬 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)],
+            [InlineKeyboardButton("🔙 العودة لطرق الدفع", callback_data="fund_account")],
+            [InlineKeyboardButton("🏠 الرئيسية", callback_data="main_menu")]
+        ]
+        await query.message.edit_text(payment_details, reply_markup=InlineKeyboardMarkup(back_kb), parse_mode='Markdown')
 
     elif data.startswith("show_cat_"):
         category = data.replace("show_cat_", "")
-        
-        # تحديد اسم القسم بناءً على الاختيار
-        if category == "digital":
-            title = "💠 الخدمات الرقمية (Software & Tools) ✨"
-        elif category == "subscriptions":
-            title = "🔵 الاشتراكات (AI & Premium) 🚀"
-        elif category == "rentals":
-            title = "🔧 خدمة إيجار الأدوات 🛠️"
-        else:
-            title = "🛒 قائمة الخدمات"
+        if category == "digital": title = "💠 الخدمات الرقمية (Software & Tools) ✨"
+        elif category == "subscriptions": title = "🔵 الاشتراكات (AI & Premium) 🚀"
+        elif category == "rentals": title = "🔧 خدمة إيجار الأدوات 🛠️"
+        else: title = "🛒 قائمة الخدمات"
         
         services = db_fetch_all("SELECT id, name, price FROM services WHERE category = ?", (category,))
         if not services:
@@ -162,7 +212,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         
         if not stock_key:
             out_of_stock_msg = "❌ **عذراً، لقد نفدت الكمية (الأكواد) لهذه الخدمة للتو!**\n\nيرجى المحاولة لاحقاً أو مراسلة الدعم الفني."
-            await query.message.edit_text(out_of_stock_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للقائمة 🔄", callback_data="main_menu")]]), parse_mode='Markdown')
+            await query.message.edit_text(out_of_stock_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للخدمات", callback_data="main_menu")]]), parse_mode='Markdown')
             return
             
         if user_info[0] >= srv[0]:
@@ -172,7 +222,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             db_execute("INSERT INTO orders (user_id, service_id, status, order_date) VALUES (?, ?, 'مكتمل ✅', ?)", (user_id, srv_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             
             success_msg = "✅ **تم الشراء بنجاح!**\n\n🎁 تم إرسال معلومات اشتراكك في الرسالة التالية لتتمكن من نسخها بسهولة 👇"
-            await query.message.edit_text(success_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 الرئيسية 🔄", callback_data="main_menu")]]), parse_mode='Markdown')
+            await query.message.edit_text(success_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
             
             await context.bot.send_message(chat_id=user_id, text=stock_key[1])
             await context.bot.send_message(chat_id=user_id, text="🌟 **شكراً لاستخدامك بوت Bfixsoftware** 🌟", parse_mode='Markdown')
@@ -187,13 +237,31 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         orders = db_fetch_all("SELECT s.name, o.status, o.order_date FROM orders o JOIN services s ON o.service_id = s.id WHERE o.user_id = ? ORDER BY o.id DESC LIMIT 5", (user_id,))
         if not orders: text = "📦 لا توجد طلبات."
         else: text = "📦 **آخر 5 طلبات:**\n\n" + "\n".join([f"▪️ **{o[0]}**\nالحالة: {o[1]}\nالتاريخ: {o[2]}\n" for o in orders])
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع 🔄", callback_data="main_menu")]]), parse_mode='Markdown')
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]]), parse_mode='Markdown')
 
     elif data == "bot_info":
-        await query.message.edit_text("🤖 متجر B-Fix الذكي للخدمات والاشتراكات.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع 🔄", callback_data="main_menu")]]))
+        await query.message.edit_text("🤖 متجر B-Fix الذكي للخدمات والاشتراكات.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]]))
 
     elif data == "main_menu":
         await start_command(update, context)
+
+# استقبال كود الشحن النصي المباشر
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('waiting_card'):
+        code = update.message.text.strip()
+        card = db_fetch_one("SELECT amount, is_used FROM cards WHERE code = ?", (code,))
+        
+        if not card or card[1] == 1:
+            await update.message.reply_text("❌ الكود غير صحيح أو مستخدم. أرسل كوداً آخر أو /cancel للإلغاء.")
+            return
+            
+        db_execute("UPDATE cards SET is_used = 1 WHERE code = ?", (code,))
+        db_execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (card[0], update.effective_user.id))
+        new_balance = db_fetch_one("SELECT balance FROM users WHERE user_id = ?", (update.effective_user.id,))[0]
+        
+        context.user_data['waiting_card'] = False
+        await update.message.reply_text(f"✅ **تم الشحن بنجاح!**\n💰 القيمة: `{card[0]}` $\n💵 رصيدك الجديد: `{new_balance}` $", parse_mode='Markdown')
+        return
 
 # ================= (4) نظام المطور =================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,20 +290,20 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         o_count = db_fetch_one("SELECT COUNT(*) FROM orders")[0]
         k_count = db_fetch_one("SELECT COUNT(*) FROM product_keys WHERE is_sold = 0")[0]
         text = f"📊 **إحصائيات:**\n👥 مستخدمين: `{u_count}`\n📦 طلبات: `{o_count}`\n🔑 أكواد متوفرة: `{k_count}`"
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع 🔄", callback_data="adm_main")]]), parse_mode='Markdown')
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")]]), parse_mode='Markdown')
     elif data == "adm_srv_menu":
         keyboard = [
             [InlineKeyboardButton("➕ إضافة خدمة جديدة", callback_data="adm_add_srv")],
             [InlineKeyboardButton("🔑 شحن أكواد لخدمة", callback_data="adm_stock_list")],
             [InlineKeyboardButton("✏️ تعديل سعر خدمة", callback_data="adm_edit_prc_list")],
             [InlineKeyboardButton("🗑 حذف خدمة", callback_data="adm_del_srv_list")],
-            [InlineKeyboardButton("🔙 رجوع 🔄", callback_data="adm_main")]
+            [InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")]
         ]
         await query.message.edit_text("📦 **إدارة الخدمات:**", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data in ["adm_del_srv_list", "adm_edit_prc_list", "adm_stock_list"]:
         services = db_fetch_all("SELECT id, name, category FROM services")
         if not services:
-            await query.message.edit_text("لا توجد خدمات مضافة حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع 🔄", callback_data="adm_srv_menu")]]))
+            await query.message.edit_text("لا توجد خدمات مضافة حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="adm_srv_menu")]]))
             return
         if data == "adm_del_srv_list": pref, action = "delsrv_", "حذف"
         elif data == "adm_edit_prc_list": pref, action = "editprc_", "تعديل سعر"
@@ -243,42 +311,20 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         keyboard = []
         for s in services:
-            # تحديد الأيقونة حسب القسم
             if s[2] == "digital": cat_icon = "💠"
             elif s[2] == "subscriptions": cat_icon = "🔵"
             else: cat_icon = "🔧"
-            
             keyboard.append([InlineKeyboardButton(f"{cat_icon} {s[1]}", callback_data=f"{pref}{s[0]}")])
         
-        keyboard.append([InlineKeyboardButton("🔙 رجوع 🔄", callback_data="adm_srv_menu")])
+        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="adm_srv_menu")])
         await query.message.edit_text(f"اختر الخدمة لـ {action}:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("delsrv_"):
         srv_id = int(data.split("_")[1])
         db_execute("DELETE FROM services WHERE id = ?", (srv_id,))
         db_execute("DELETE FROM product_keys WHERE service_id = ?", (srv_id,))
-        await query.message.edit_text("✅ تم الحذف بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 إدارة الخدمات 🔄", callback_data="adm_srv_menu")]]))
+        await query.message.edit_text("✅ تم الحذف بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 إدارة الخدمات", callback_data="adm_srv_menu")]]))
 
-# ================= (5) معالجات المحادثة الصارمة =================
-async def user_charge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.message.edit_text("💳 أرسل **كود البطاقة** الآن (أو أرسل /cancel للإلغاء):", parse_mode='Markdown')
-    return USER_CARD_CODE
-
-async def user_charge_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    code = update.message.text.strip()
-    card = db_fetch_one("SELECT amount, is_used FROM cards WHERE code = ?", (code,))
-    
-    if not card or card[1] == 1:
-        await update.message.reply_text("❌ الكود غير صحيح أو مستخدم. أرسل كوداً آخر أو /cancel.")
-        return USER_CARD_CODE
-        
-    db_execute("UPDATE cards SET is_used = 1 WHERE code = ?", (code,))
-    db_execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (card[0], update.effective_user.id))
-    new_balance = db_fetch_one("SELECT balance FROM users WHERE user_id = ?", (update.effective_user.id,))[0]
-    
-    await update.message.reply_text(f"✅ **تم الشحن بنجاح!**\n💰 القيمة: `{card[0]}` $\n💵 رصيدك الجديد: `{new_balance}` $", parse_mode='Markdown')
-    return ConversationHandler.END
-
+# ================= (5) معالجات المحادثة للإدارة =================
 async def admin_conv_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return ConversationHandler.END
     query = update.callback_query
@@ -447,13 +493,6 @@ def main():
     app.add_handler(CommandHandler("admin", admin_panel))
     
     app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(user_charge_start, pattern="^charge_account$")],
-        states={USER_CARD_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, user_charge_receive)]},
-        fallbacks=[CommandHandler("cancel", cancel_handler)],
-        allow_reentry=True
-    ))
-
-    app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_conv_start, pattern="^(adm_add_bal|adm_sub_bal|adm_search|adm_broadcast|adm_add_srv|editprc_.*|adm_new_card|addstock_.*)$")],
         states={
             ADMIN_SRV_CATEGORY: [CallbackQueryHandler(adm_rx_category, pattern="^cat_")],
@@ -476,6 +515,9 @@ def main():
     
     app.add_handler(CallbackQueryHandler(admin_menus_handler, pattern="^(adm_|delsrv_)"))
     app.add_handler(CallbackQueryHandler(main_buttons_handler))
+    
+    # معالج الرسائل النصية العامة
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 
     print("\n✅ البوت جاهز ويعمل الآن بقوة! (الرجاء التجربة في تيليجرام)")
     app.run_polling(drop_pending_updates=True)
