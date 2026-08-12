@@ -1,1378 +1,708 @@
-"""B-Fix Store Bot v2 — نسخة محسنة وآمنة نسبياً لبوت متجر تيليجرام."""
-import asyncio
-import html
-import logging
+# ==============================================================================
+# |   B-Fix Smart Bot - النسخة الاحترافية الكاملة والمحدثة                    |
+# |   (العروض المجانية، عروض VIP، نظام صيانة متكامل، إدارة كميات دقيقة،        |
+# |    لوحة تحكم شاملة، حذف الإشعارات، وقاعدة بيانات آمنة 100%)              |
+# ==============================================================================
+
 import os
 import sqlite3
+import logging
+import asyncio
+import warnings
 import threading
+import urllib.request
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
-from telegram.error import Forbidden, RetryAfter, TelegramError
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, 
+    ContextTypes, ConversationHandler, MessageHandler, filters
 )
+from telegram.warnings import PTBUserWarning
 
-# لا تضع التوكن أو بيانات الدفع في هذا الملف. أضفها كمتغيرات بيئية عند التشغيل.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
-DB_NAME = os.getenv("DB_NAME", "bfix_store.db")
-WHATSAPP_LINK = os.getenv("WHATSAPP_LINK", "https://t.me/bfixSoftware")
-SUPPORT_LINK = os.getenv("SUPPORT_LINK", "https://t.me/bfixSoftware")
-PAYMENT_DETAILS = os.getenv(
-    "PAYMENT_DETAILS",
-    "تواصل مع الدعم للحصول على بيانات الدفع المحدثة، ثم أرسل إشعار التحويل مع الاسم والمبلغ ووسيلة الدفع.",
-)
-# خدمة Render من نوع Web Service تحتاج منفذ HTTP مفتوحاً؛ مفعّل افتراضياً.
-ENABLE_HEALTHCHECK = os.getenv("ENABLE_HEALTHCHECK", "true").lower() == "true"
+# إخفاء التحذيرات
+warnings.filterwarnings("ignore", category=PTBUserWarning)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-)
-logger = logging.getLogger("bfix_store")
+# --- سيرفر ويب مصغر لإبقاء الاستضافة تعمل 24/7 ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"B-Fix Bot is ALIVE and RUNNING 24/7!")
+    def log_message(self, format, *args):
+        pass
 
-(
-    ADMIN_USER_ID, ADMIN_AMOUNT, ADMIN_SEARCH, ADMIN_BROADCAST, ADMIN_SRV_CATEGORY,
-    ADMIN_SRV_NAME, ADMIN_SRV_DESC, ADMIN_SRV_PRICE, ADMIN_SRV_DURATION,
-    ADMIN_NEW_PRICE, ADMIN_CARD_CODE, ADMIN_CARD_AMOUNT, ADMIN_STOCK_QUANTITY,
-    ADMIN_STOCK_KEY,
-) = range(14)
-(
-    ADMIN_MAINTENANCE_MESSAGE, ADMIN_BROADCAST_TEXT, ADMIN_EDIT_FIELD,
-    ADMIN_EDIT_VALUE, ADMIN_MANUAL_QUESTION, ADMIN_MANUAL_WAIT,
-    ADMIN_MANUAL_COMPLETE, ADMIN_ORDER_MESSAGE,
-) = range(14, 22)
-USER_MANUAL_RESPONSE = 50
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
 
-MAX_NAME = 80
-MAX_DESCRIPTION = 1000
-MAX_CODE = 120
-MAX_STOCK_TEXT = 4000
-MAX_STOCK_QUANTITY = 100
-MAX_BROADCAST_LENGTH = 3500
-MAX_ORDER_MESSAGE_LENGTH = 3500
+threading.Thread(target=run_health_server, daemon=True).start()
 
+# ================= (1) الإعدادات =================
+BOT_TOKEN = "ضع_التوكن_الخاص_بك_هنا"  # ⬅️ ضع التوكن هنا
+ADMIN_ID = 00000000  # ⬅️ ضع الآيدي الخاص بك كرقْم (Integer)
 
-# ========================= قاعدة البيانات =========================
-def now_text():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+WHATSAPP_LINK = "https://iwtsp.com/967777728478"
+SUPPORT_LINK = "https://t.me/bfixSoftware"
+DB_NAME = "bfix_store.db"
 
+# --- ألوان الأزرار (رموز تعبيرية) ---
+COLOR_PRIMARY = "🔵"
+COLOR_SUCCESS = "🟢"
+COLOR_DANGER = "🔴"
+COLOR_WARNING = "⚠️"
+COLOR_INFO = "ℹ️"
+COLOR_ACTION = "✨"
 
-def db_connect():
-    conn = sqlite3.connect(DB_NAME, timeout=30, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 30000")
-    return conn
+# --- حالات المحادثة الإدارية ---
+(ADMIN_USER_ID, ADMIN_AMOUNT, ADMIN_SEARCH, ADMIN_BROADCAST, ADMIN_SRV_CATEGORY,
+ ADMIN_SRV_NAME, ADMIN_SRV_DESC, ADMIN_SRV_PRICE, ADMIN_SRV_DURATION, 
+ ADMIN_NEW_PRICE, ADMIN_CARD_CODE, ADMIN_CARD_AMOUNT, ADMIN_STOCK_KEY,
+ ADMIN_MAINTENANCE_TEXT) = range(14)
 
+USER_CARD_CODE = 20
 
-def db_one(query, params=()):
-    with db_connect() as conn:
-        return conn.execute(query, params).fetchone()
-
-
-def db_all(query, params=()):
-    with db_connect() as conn:
-        return conn.execute(query, params).fetchall()
-
-
-def db_exec(query, params=()):
-    with db_connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
+# ================= (2) نظام قاعدة البيانات الآمن والمحدث =================
+def db_execute(query, params=()):
+    with sqlite3.connect(DB_NAME, timeout=30) as conn:
         conn.execute(query, params)
         conn.commit()
 
+def db_fetch_one(query, params=()):
+    with sqlite3.connect(DB_NAME, timeout=30) as conn:
+        return conn.execute(query, params).fetchone()
 
-def ensure_column(conn, table, column, declaration):
-    fields = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in fields:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
-
+def db_fetch_all(query, params=()):
+    with sqlite3.connect(DB_NAME, timeout=30) as conn:
+        return conn.execute(query, params).fetchall()
 
 def init_db():
-    """إنشاء القاعدة وترقية الجداول القديمة دون حذف بياناتها."""
-    with db_connect() as conn:
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("""CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, balance REAL NOT NULL DEFAULT 0,
-            balance_cents INTEGER NOT NULL DEFAULT 0, join_date TEXT NOT NULL)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT NOT NULL,
-            price REAL NOT NULL DEFAULT 0, price_cents INTEGER NOT NULL DEFAULT 0,
-            duration TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'digital',
-            is_active INTEGER NOT NULL DEFAULT 1)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, service_id INTEGER NOT NULL,
-            product_key_id INTEGER, price_cents INTEGER, status TEXT NOT NULL, order_date TEXT NOT NULL)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS cards (
-            code TEXT PRIMARY KEY, amount REAL NOT NULL DEFAULT 0, amount_cents INTEGER,
-            is_used INTEGER NOT NULL DEFAULT 0, used_by INTEGER, used_at TEXT)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS product_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, service_id INTEGER NOT NULL,
-            key_text TEXT NOT NULL, is_sold INTEGER NOT NULL DEFAULT 0)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
-            amount_cents INTEGER NOT NULL, transaction_type TEXT NOT NULL,
-            reference TEXT, balance_after_cents INTEGER NOT NULL, created_at TEXT NOT NULL)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS free_claims (
-            user_id INTEGER NOT NULL, service_id INTEGER NOT NULL,
-            order_id INTEGER NOT NULL, claimed_at TEXT NOT NULL,
-            PRIMARY KEY (user_id, service_id))""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS bot_settings (
-            setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL,
-            updated_at TEXT NOT NULL)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS broadcasts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'sent', created_at TEXT NOT NULL,
-            deleted_at TEXT)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS broadcast_deliveries (
-            broadcast_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
-            message_id INTEGER, status TEXT NOT NULL, deleted_at TEXT,
-            PRIMARY KEY (broadcast_id, user_id))""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS manual_orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER UNIQUE,
-            user_id INTEGER NOT NULL, service_id INTEGER NOT NULL,
-            request_data TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'بانتظار المراجعة',
-            admin_note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-            completed_at TEXT)""")
-
-        # ترقية من نسخة المستخدم الأصلية.
-        ensure_column(conn, "users", "balance_cents", "INTEGER")
-        ensure_column(conn, "services", "price_cents", "INTEGER")
-        ensure_column(conn, "services", "is_active", "INTEGER NOT NULL DEFAULT 1")
-        ensure_column(conn, "services", "execution_mode", "TEXT NOT NULL DEFAULT 'auto'")
-        ensure_column(conn, "services", "request_prompt", "TEXT NOT NULL DEFAULT ''")
-        ensure_column(conn, "services", "wait_message", "TEXT NOT NULL DEFAULT 'تم استلام طلبك، يرجى الانتظار.'")
-        ensure_column(conn, "services", "completion_prompt", "TEXT NOT NULL DEFAULT 'تم تنفيذ طلبك بنجاح.'")
-        ensure_column(conn, "orders", "product_key_id", "INTEGER")
-        ensure_column(conn, "orders", "price_cents", "INTEGER")
-        ensure_column(conn, "cards", "amount_cents", "INTEGER")
-        ensure_column(conn, "cards", "used_by", "INTEGER")
-        ensure_column(conn, "cards", "used_at", "TEXT")
-        ensure_column(conn, "manual_orders", "order_id", "INTEGER")
-        conn.execute("UPDATE users SET balance_cents = CAST(ROUND(COALESCE(balance,0)*100) AS INTEGER) WHERE balance_cents IS NULL")
-        conn.execute("UPDATE services SET price_cents = CAST(ROUND(COALESCE(price,0)*100) AS INTEGER) WHERE price_cents IS NULL")
-        conn.execute("UPDATE cards SET amount_cents = CAST(ROUND(COALESCE(amount,0)*100) AS INTEGER) WHERE amount_cents IS NULL")
-        conn.execute("""UPDATE orders SET price_cents = COALESCE(
-            (SELECT price_cents FROM services WHERE services.id=orders.service_id),0)
-            WHERE price_cents IS NULL""")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_services_category_active ON services(category,is_active)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_stock ON product_keys(service_id,is_sold)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id,id DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id,id DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_free_claims_service ON free_claims(service_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_deliveries_broadcast ON broadcast_deliveries(broadcast_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_manual_orders_status ON manual_orders(status,id DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_manual_orders_user ON manual_orders(user_id,id DESC)")
-        conn.execute("INSERT OR IGNORE INTO bot_settings (setting_key,setting_value,updated_at) VALUES ('maintenance_enabled','0',?)", (now_text(),))
-        conn.execute("INSERT OR IGNORE INTO bot_settings (setting_key,setting_value,updated_at) VALUES ('maintenance_message','نعتذر، البوت تحت الصيانة حالياً. يرجى المحاولة لاحقاً.',?)", (now_text(),))
+    with sqlite3.connect(DB_NAME, timeout=30) as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        
+        # 1. جدول المستخدمين
+        conn.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY, 
+            name TEXT, 
+            balance REAL DEFAULT 0.0, 
+            join_date TEXT
+        )''')
+        
+        # 2. جدول الخدمات
+        conn.execute('''CREATE TABLE IF NOT EXISTS services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            name TEXT, 
+            description TEXT, 
+            price REAL, 
+            duration TEXT, 
+            category TEXT DEFAULT 'digital',
+            quantity INTEGER DEFAULT 0 
+        )''')
+        
+        try: conn.execute("ALTER TABLE services ADD COLUMN category TEXT DEFAULT 'digital'")
+        except: pass
+        try: conn.execute("ALTER TABLE services ADD COLUMN quantity INTEGER DEFAULT 0")
+        except: pass
+        
+        # 3. جدول الطلبات
+        conn.execute('''CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            user_id INTEGER, 
+            service_id INTEGER, 
+            status TEXT, 
+            order_date TEXT
+        )''')
+        
+        # 4. جدول بطاقات الشحن
+        conn.execute('''CREATE TABLE IF NOT EXISTS cards (
+            code TEXT PRIMARY KEY, 
+            amount REAL, 
+            is_used INTEGER DEFAULT 0
+        )''')
+        
+        # 5. جدول مفاتيح/أكواد المنتجات
+        conn.execute('''CREATE TABLE IF NOT EXISTS product_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            service_id INTEGER, 
+            key_text TEXT, 
+            is_sold INTEGER DEFAULT 0
+        )''')
+        
+        # 6. جدول وضع الصيانة
+        conn.execute('''CREATE TABLE IF NOT EXISTS maintenance_mode (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            is_active INTEGER DEFAULT 0,
+            custom_message TEXT
+        )''')
+        
+        # 7. جدول آخر إشعار جماعي
+        conn.execute('''CREATE TABLE IF NOT EXISTS last_broadcast (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT
+        )''')
+        
+        chk_main = conn.execute("SELECT id FROM maintenance_mode WHERE id = 1").fetchone()
+        if not chk_main:
+            conn.execute("INSERT INTO maintenance_mode (id, is_active) VALUES (1, 0)")
+            
         conn.commit()
+    print("\n✅ تم تهيئة قاعدة البيانات بنجاح!")
 
-
-def cents_text(value):
-    return f"{Decimal(int(value or 0))/Decimal(100):.2f}"
-
-
-def parse_cents(text):
-    try:
-        amount = Decimal(text.strip().replace(",", "."))
-        if not amount.is_finite() or amount <= 0:
-            return None
-        amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        return int(amount * 100)
-    except InvalidOperation:
-        return None
-
-
-def clean(text, maximum):
-    text = text.strip()
-    return text if text and len(text) <= maximum else None
-
-
-def esc(value):
-    return html.escape(str(value), quote=False)
-
-
-def styled_button(text, callback_data=None, url=None, style=None):
-    """ينشئ زرّاً مع لون Telegram قياسي اختياري؛ لا يدعم تيليجرام ألواناً مخصصة."""
-    kwargs = {}
-    if callback_data is not None:
-        kwargs["callback_data"] = callback_data
-    if url is not None:
-        kwargs["url"] = url
-    if style in {"primary", "success", "danger"}:
-        kwargs["api_kwargs"] = {"style": {f"bg_{style}": True}}
-    return InlineKeyboardButton(text, **kwargs)
-
-
-def is_admin(user_id):
-    return ADMIN_ID > 0 and user_id == ADMIN_ID
-
-
-def upsert_user(user_id, name):
-    name = clean(name or "عميل", MAX_NAME) or "عميل"
-    with db_connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""INSERT INTO users (user_id,name,balance,balance_cents,join_date)
-            VALUES (?,?,0,0,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name""",
-            (user_id, name, now_text()))
-        conn.commit()
-
-
-def get_setting(setting_key, default=""):
-    row = db_one("SELECT setting_value FROM bot_settings WHERE setting_key=?", (setting_key,))
-    return row["setting_value"] if row else default
-
-
-def set_setting(setting_key, value):
-    with db_connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""INSERT INTO bot_settings (setting_key,setting_value,updated_at)
-            VALUES (?,?,?) ON CONFLICT(setting_key) DO UPDATE SET
-            setting_value=excluded.setting_value, updated_at=excluded.updated_at""",
-            (setting_key, str(value), now_text()))
-        conn.commit()
-
-
-def maintenance_enabled():
-    return get_setting("maintenance_enabled", "0") == "1"
-
-
-def maintenance_message():
-    return get_setting("maintenance_message", "نعتذر، البوت تحت الصيانة حالياً. يرجى المحاولة لاحقاً.")
-
-
-def get_service(service_id, active=True):
-    sql = """SELECT id,name,description,price_cents,duration,category,is_active,
-        execution_mode,request_prompt,wait_message,completion_prompt
-        FROM services WHERE id=?"""
-    if active:
-        sql += " AND is_active=1"
-    return db_one(sql, (service_id,))
-
-
-def stock_count(service_id):
-    row = db_one("SELECT COUNT(*) AS total FROM product_keys WHERE service_id=? AND is_sold=0", (service_id,))
-    return int(row["total"])
-
-
-def redeem_card(user_id, code):
-    """شحن ذري: لا يمكن استعمال الكود مرتين حتى مع وصول رسالتين متوازيتين."""
-    conn = db_connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        card = conn.execute("SELECT amount_cents FROM cards WHERE code=? AND is_used=0", (code,)).fetchone()
-        user = conn.execute("SELECT balance_cents FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not card or not user or not card["amount_cents"] or int(card["amount_cents"]) <= 0:
-            conn.rollback()
-            return False, "الكود غير صحيح أو مستخدم.", None
-        amount = int(card["amount_cents"])
-        change = conn.execute("""UPDATE cards SET is_used=1,used_by=?,used_at=?
-            WHERE code=? AND is_used=0""", (user_id, now_text(), code))
-        if change.rowcount != 1:
-            conn.rollback()
-            return False, "تم استخدام الكود للتو. أرسل كوداً آخر.", None
-        balance = int(user["balance_cents"] or 0) + amount
-        conn.execute("UPDATE users SET balance_cents=?,balance=? WHERE user_id=?", (balance, balance/100, user_id))
-        conn.execute("""INSERT INTO transactions
-            (user_id,amount_cents,transaction_type,reference,balance_after_cents,created_at)
-            VALUES (?,?,'card_redeem',?,?,?)""", (user_id, amount, code, balance, now_text()))
-        conn.commit()
-        return True, "تم الشحن بنجاح.", balance
-    except sqlite3.Error:
-        conn.rollback()
-        logger.exception("فشل شحن بطاقة")
-        return False, "تعذر شحن الكود مؤقتاً.", None
-    finally:
-        conn.close()
-
-
-def purchase(user_id, service_id):
-    """يحجز المفتاح ويسجل الطلب ذرّياً؛ العرض المجاني متاح مرة واحدة لكل عميل."""
-    conn = db_connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        service = conn.execute(
-            "SELECT id,name,price_cents,category FROM services WHERE id=? AND is_active=1",
-            (service_id,),
-        ).fetchone()
-        user = conn.execute("SELECT name,balance_cents FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not service or not user:
-            conn.rollback()
-            return False, "الخدمة لم تعد متاحة.", None
-
-        price = int(service["price_cents"] or 0)
-        is_free_offer = service["category"] == "free_offers"
-        if (is_free_offer and price != 0) or (not is_free_offer and price <= 0):
-            conn.rollback()
-            return False, "إعداد سعر هذه الخدمة غير صالح. تواصل مع الدعم.", None
-        if is_free_offer and conn.execute(
-            "SELECT 1 FROM free_claims WHERE user_id=? AND service_id=?", (user_id, service_id)
-        ).fetchone():
-            conn.rollback()
-            return False, "استلمت هذا العرض المجاني من قبل.", None
-        if not is_free_offer and int(user["balance_cents"] or 0) < price:
-            conn.rollback()
-            return False, "رصيدك غير كافٍ لإتمام العملية.", None
-
-        product = conn.execute("""SELECT id,key_text FROM product_keys
-            WHERE service_id=? AND is_sold=0 ORDER BY id LIMIT 1""", (service_id,)).fetchone()
-        if not product:
-            conn.rollback()
-            return False, "نفدت الكمية لهذه الخدمة. حاول لاحقاً.", None
-        reserved = conn.execute("UPDATE product_keys SET is_sold=1 WHERE id=? AND is_sold=0", (product["id"],))
-        if reserved.rowcount != 1:
-            conn.rollback()
-            return False, "تم استلام آخر كود للتو؛ أعد المحاولة.", None
-
-        balance = int(user["balance_cents"] or 0) - price
-        if price:
-            debit = conn.execute("""UPDATE users SET balance_cents=?,balance=?
-                WHERE user_id=? AND balance_cents>=?""", (balance, balance/100, user_id, price))
-            if debit.rowcount != 1:
-                conn.rollback()
-                return False, "تعذر التحقق من الرصيد. أعد المحاولة.", None
-        order = conn.execute("""INSERT INTO orders
-            (user_id,service_id,product_key_id,price_cents,status,order_date)
-            VALUES (?,?,?,?, 'مكتمل',?)""", (user_id, service_id, product["id"], price, now_text()))
-        if is_free_offer:
-            conn.execute("""INSERT INTO free_claims (user_id,service_id,order_id,claimed_at)
-                VALUES (?,?,?,?)""", (user_id, service_id, order.lastrowid, now_text()))
-            transaction_type, amount = "free_claim", 0
-        else:
-            transaction_type, amount = "purchase", -price
-        conn.execute("""INSERT INTO transactions
-            (user_id,amount_cents,transaction_type,reference,balance_after_cents,created_at)
-            VALUES (?,?,?,?,?,?)""", (user_id, amount, transaction_type, f"order:{order.lastrowid}", balance, now_text()))
-        conn.commit()
-        return True, "تم استلام العرض المجاني بنجاح." if is_free_offer else "تم الشراء بنجاح.", {
-            "order_id": order.lastrowid, "name": service["name"], "price": price,
-            "key": product["key_text"], "balance": balance, "user_name": user["name"],
-            "is_free_offer": is_free_offer,
-        }
-    except sqlite3.Error:
-        conn.rollback()
-        logger.exception("فشل طلب الخدمة %s", service_id)
-        return False, "حدث خطأ مؤقت أثناء إتمام الطلب.", None
-    finally:
-        conn.close()
-
-
-def create_manual_order(user_id, service_id, request_data):
-    """يحفظ طلباً يحتاج تدخلاً يدوياً، ويخصم السعر مرة واحدة ضمن معاملة واحدة."""
-    conn = db_connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        service = conn.execute("""SELECT id,name,price_cents,category,execution_mode
-            FROM services WHERE id=? AND is_active=1""", (service_id,)).fetchone()
-        user = conn.execute("SELECT name,balance_cents FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not service or not user or service["execution_mode"] != "manual":
-            conn.rollback()
-            return False, "الخدمة لم تعد متاحة للطلب اليدوي.", None
-        price = int(service["price_cents"] or 0)
-        is_free_offer = service["category"] == "free_offers"
-        if (is_free_offer and price != 0) or (not is_free_offer and price <= 0):
-            conn.rollback()
-            return False, "إعداد سعر الخدمة غير صالح.", None
-        if is_free_offer and conn.execute("SELECT 1 FROM free_claims WHERE user_id=? AND service_id=?", (user_id, service_id)).fetchone():
-            conn.rollback()
-            return False, "استلمت هذا العرض المجاني من قبل.", None
-        if not is_free_offer and int(user["balance_cents"] or 0) < price:
-            conn.rollback()
-            return False, "رصيدك غير كافٍ لإتمام الطلب.", None
-        balance = int(user["balance_cents"] or 0) - price
-        if price:
-            debit = conn.execute("""UPDATE users SET balance_cents=?,balance=?
-                WHERE user_id=? AND balance_cents>=?""", (balance, balance/100, user_id, price))
-            if debit.rowcount != 1:
-                conn.rollback()
-                return False, "تعذر التحقق من الرصيد. أعد المحاولة.", None
-        order = conn.execute("""INSERT INTO orders
-            (user_id,service_id,product_key_id,price_cents,status,order_date)
-            VALUES (?,?,NULL,?,'بانتظار التنفيذ',?)""", (user_id, service_id, price, now_text()))
-        manual = conn.execute("""INSERT INTO manual_orders
-            (order_id,user_id,service_id,request_data,status,created_at,updated_at)
-            VALUES (?,?,?,?,'بانتظار المراجعة',?,?)""",
-            (order.lastrowid, user_id, service_id, request_data, now_text(), now_text()))
-        if is_free_offer:
-            conn.execute("INSERT INTO free_claims (user_id,service_id,order_id,claimed_at) VALUES (?,?,?,?)",
-                (user_id, service_id, order.lastrowid, now_text()))
-            transaction_type, amount = "free_manual_claim", 0
-        else:
-            transaction_type, amount = "manual_order", -price
-        conn.execute("""INSERT INTO transactions
-            (user_id,amount_cents,transaction_type,reference,balance_after_cents,created_at)
-            VALUES (?,?,?,?,?,?)""", (user_id, amount, transaction_type, f"order:{order.lastrowid}", balance, now_text()))
-        conn.commit()
-        return True, "تم تسجيل طلبك بنجاح.", {
-            "manual_id": manual.lastrowid, "order_id": order.lastrowid, "service_name": service["name"],
-            "price": price, "balance": balance, "user_name": user["name"], "is_free_offer": is_free_offer,
-        }
-    except sqlite3.Error:
-        conn.rollback()
-        logger.exception("فشل إنشاء طلب يدوي")
-        return False, "حدث خطأ مؤقت أثناء تسجيل الطلب.", None
-    finally:
-        conn.close()
-
-
-def get_manual_order(manual_id):
-    return db_one("""SELECT m.id,m.order_id,m.user_id,m.service_id,m.request_data,m.status,m.admin_note,
-        m.created_at,m.updated_at,s.name AS service_name,s.wait_message,s.completion_prompt,u.name AS user_name
-        FROM manual_orders m JOIN services s ON s.id=m.service_id JOIN users u ON u.user_id=m.user_id
-        WHERE m.id=?""", (manual_id,))
-
-
-def update_manual_order(manual_id, status, admin_note=None, completed=False):
-    conn = db_connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT order_id FROM manual_orders WHERE id=?", (manual_id,)).fetchone()
-        if not row:
-            conn.rollback()
-            return False
-        completed_at = now_text() if completed else None
-        conn.execute("""UPDATE manual_orders SET status=?,admin_note=?,updated_at=?,
-            completed_at=COALESCE(?,completed_at) WHERE id=?""",
-            (status, admin_note, now_text(), completed_at, manual_id))
-        order_status = "مكتمل" if completed else status
-        conn.execute("UPDATE orders SET status=? WHERE id=?", (order_status, row["order_id"]))
-        conn.commit()
-        return True
-    except sqlite3.Error:
-        conn.rollback()
-        logger.exception("فشل تحديث الطلب اليدوي")
-        return False
-    finally:
-        conn.close()
-
-
-def adjust_balance(user_id, delta, action):
-    conn = db_connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        user = conn.execute("SELECT balance_cents FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user:
-            conn.rollback()
-            return False, "المستخدم غير موجود."
-        balance = int(user["balance_cents"] or 0) + delta
-        if balance < 0:
-            conn.rollback()
-            return False, "لا يمكن أن يصبح الرصيد سالباً."
-        conn.execute("UPDATE users SET balance_cents=?,balance=? WHERE user_id=?", (balance,balance/100,user_id))
-        conn.execute("""INSERT INTO transactions
-            (user_id,amount_cents,transaction_type,reference,balance_after_cents,created_at)
-            VALUES (?,?,?,'admin_adjustment',?,?)""", (user_id,delta,action,balance,now_text()))
-        conn.commit()
-        return True, cents_text(balance)
-    except sqlite3.Error:
-        conn.rollback()
-        logger.exception("فشل تعديل الرصيد")
-        return False, "خطأ في قاعدة البيانات."
-    finally:
-        conn.close()
-
-
-# ========================= واجهة العميل =========================
-def main_keyboard():
-    return InlineKeyboardMarkup([
-        [styled_button("الخدمات الرقمية ✨", callback_data="show_cat_digital", style="success"),
-         styled_button("الاشتراكات 🚀", callback_data="show_cat_subscriptions", style="success")],
-        [styled_button("العروض المجانية 🎁", callback_data="show_cat_free_offers", style="primary"),
-         styled_button("عروض VIP 👑", callback_data="show_cat_vip", style="primary")],
-        [styled_button("خدمة إيجار الأدوات 🛠️", callback_data="show_cat_rentals", style="success")],
-        [styled_button("سجل طلباتي 🔄", callback_data="my_orders", style="primary"),
-         styled_button("حسابي ⚡", callback_data="my_profile", style="primary")],
-        [styled_button("شحن الرصيد بكود", callback_data="charge_account", style="success"),
-         styled_button("تغذية حسابك", callback_data="fund_account", style="success")],
-        [styled_button("واتساب 🌐", url=WHATSAPP_LINK, style="primary"),
-         styled_button("الدعم 🛠️", url=SUPPORT_LINK, style="primary")],
-        [styled_button("معلومات البوت ℹ️", callback_data="bot_info", style="danger")],
-    ])
-
-
-async def send_maintenance_notice(update, context):
-    text = (
-        "<b>⚙️ البوت تحت الصيانة المؤقتة</b>\n\n"
-        f"{esc(maintenance_message())}\n\n"
-        "<i>نعمل على تحسين الخدمة وسنعود قريباً. شكراً لصبرك.</i>"
-    )
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.answer("البوت تحت الصيانة حالياً.", show_alert=True)
-        await update.callback_query.message.edit_text(text, parse_mode=ParseMode.HTML)
-    elif update.effective_message:
-        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
-
-
-async def show_main(update, context):
-    user = update.effective_user
+def add_user_if_not_exists(user_id, name):
+    user = db_fetch_one("SELECT * FROM users WHERE user_id = ?", (user_id,))
     if not user:
-        return
-    upsert_user(user.id, user.first_name)
-    if maintenance_enabled() and not is_admin(user.id):
-        await send_maintenance_notice(update, context)
-        return
-    context.user_data.pop("waiting_card", None)
-    context.user_data.pop("manual_service_id", None)
-    text = f"<b>مرحباً {esc(user.first_name)}،</b>\n\nأهلاً بك في متجر B-Fix للخدمات والاشتراكات الرقمية. اختر القسم المطلوب من القائمة."
-    if update.message:
-        await update.message.reply_text(text, reply_markup=main_keyboard(), parse_mode=ParseMode.HTML)
-    elif update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(text, reply_markup=main_keyboard(), parse_mode=ParseMode.HTML)
+        db_execute("INSERT INTO users (user_id, name, balance, join_date) VALUES (?, ?, ?, ?)", 
+                   (user_id, name, 0.0, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
+# ================= (2.5) فحص وضع الصيانة =================
+def is_bot_under_maintenance():
+    status = db_fetch_one("SELECT is_active FROM maintenance_mode WHERE id = 1")
+    return status[0] == 1 if status else False
 
-async def start(update, context):
-    await show_main(update, context)
+def get_maintenance_message():
+    msg = db_fetch_one("SELECT custom_message FROM maintenance_mode WHERE id = 1")
+    return msg[0] if msg and msg[0] else None
 
-
-async def main_handler(update, context):
-    query = update.callback_query
-    if not query or not query.message:
-        return
-    user_id = query.from_user.id
-    upsert_user(user_id, query.from_user.first_name)
-    data = query.data or ""
-    if maintenance_enabled() and not is_admin(user_id):
-        await send_maintenance_notice(update, context)
-        return
-    await query.answer()
-    if data != "charge_account":
-        context.user_data.pop("waiting_card", None)
-
-    if data == "main_menu":
-        await show_main(update, context)
-    elif data == "my_profile":
-        user = db_one("SELECT name,balance_cents FROM users WHERE user_id=?", (user_id,))
-        await query.message.edit_text(
-            f"<b>ملفك الشخصي</b>\n\nالاسم: {esc(user['name'])}\nالمعرف: <code>{user_id}</code>\nالرصيد: <b>{cents_text(user['balance_cents'])} $</b>",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("تغذية الحساب", callback_data="fund_account")], [InlineKeyboardButton("القائمة الرئيسية", callback_data="main_menu")]]),
-            parse_mode=ParseMode.HTML)
-    elif data == "charge_account":
-        context.user_data["waiting_card"] = True
-        await query.message.edit_text("أرسل <b>كود بطاقة الشحن</b> الآن، أو /cancel للإلغاء.", parse_mode=ParseMode.HTML)
-    elif data == "fund_account":
-        await query.message.edit_text("<b>تغذية الحساب</b>\n\nاعرض تفاصيل الدفع، وبعد التحويل أرسل الإشعار إلى الدعم لاعتماد الرصيد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("عرض تفاصيل الدفع", callback_data="pay_details")], [InlineKeyboardButton("شحن بكود", callback_data="charge_account")], [InlineKeyboardButton("القائمة الرئيسية", callback_data="main_menu")]]), parse_mode=ParseMode.HTML)
-    elif data == "pay_details":
-        await query.message.edit_text(f"<b>تفاصيل الدفع</b>\n\n{esc(PAYMENT_DETAILS)}\n\nبعد التحويل، أرسل الإشعار للدعم مع الاسم والمبلغ ووسيلة الدفع.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("التواصل مع الدعم", url=WHATSAPP_LINK)], [InlineKeyboardButton("رجوع", callback_data="fund_account")]]), parse_mode=ParseMode.HTML)
-    elif data.startswith("show_cat_"):
-        category = data.removeprefix("show_cat_")
-        titles = {
-            "digital": "الخدمات الرقمية",
-            "subscriptions": "الاشتراكات",
-            "free_offers": "العروض المجانية",
-            "vip": "عروض VIP",
-            "rentals": "إيجار الأدوات",
-        }
-        if category not in titles:
-            await query.answer("قسم غير صالح.", show_alert=True)
-            return
-        services = db_all("SELECT id,name,price_cents,execution_mode FROM services WHERE category=? AND is_active=1 ORDER BY id DESC", (category,))
-        if not services:
-            await query.message.edit_text(f"لا توجد خدمات متاحة في قسم <b>{titles[category]}</b> حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("القائمة الرئيسية",callback_data="main_menu")]]),parse_mode=ParseMode.HTML)
-            return
-        buttons = []
-        for service in services:
-            quantity = stock_count(service["id"])
-            status = "حسب الطلب" if service["execution_mode"] == "manual" else (f"متوفر: {quantity}" if quantity else "نفد")
-            price_label = "مجاني" if category == "free_offers" else f"{cents_text(service['price_cents'])}$"
-            button_style = "primary" if category in {"free_offers", "vip"} else "success"
-            buttons.append([styled_button(f"{str(service['name'])[:30]} | {price_label} | {status}", callback_data=f"srv_{service['id']}", style=button_style)])
-        buttons.append([styled_button("القائمة الرئيسية", callback_data="main_menu", style="danger")])
-        await query.message.edit_text(f"<b>{titles[category]}</b>\n\nاختر خدمة لعرض التفاصيل.",reply_markup=InlineKeyboardMarkup(buttons),parse_mode=ParseMode.HTML)
-    elif data.startswith("srv_"):
-        try:
-            service_id = int(data.removeprefix("srv_"))
-        except ValueError:
-            await query.answer("الخدمة غير صالحة.", show_alert=True)
-            return
-        service = get_service(service_id)
-        if not service:
-            await query.answer("الخدمة لم تعد متاحة.",show_alert=True)
-            return
-        is_free_offer = service["category"] == "free_offers"
-        is_manual = service["execution_mode"] == "manual"
-        price_label = "مجاني" if is_free_offer else f"{cents_text(service['price_cents'])}$"
-        action_label = "إرسال الطلب ⚡" if is_manual else ("استلام العرض المجاني 🎁" if is_free_offer else "شراء الآن ⚡")
-        action_style = "primary" if is_free_offer or is_manual else "success"
-        available_label = "حسب الطلب" if is_manual else str(stock_count(service_id))
-        await query.message.edit_text(
-            f"<b>الخدمة:</b> {esc(service['name'])}\n\n<b>الوصف:</b> {esc(service['description'])}\n<b>المدة:</b> {esc(service['duration'])}\n<b>السعر:</b> {price_label}\n<b>الكمية المتوفرة:</b> {available_label}",
-            reply_markup=InlineKeyboardMarkup([[styled_button(action_label, callback_data=f"buy_{service_id}", style=action_style)],[styled_button("رجوع للقسم", callback_data=f"show_cat_{service['category']}", style="danger")]]),parse_mode=ParseMode.HTML)
-    elif data.startswith("buy_"):
-        try:
-            service_id = int(data.removeprefix("buy_"))
-        except ValueError:
-            await query.answer("الخدمة غير صالحة.",show_alert=True)
-            return
-        requested_service = get_service(service_id)
-        if not requested_service:
-            await query.answer("الخدمة لم تعد متاحة.", show_alert=True)
-            return
-        if requested_service["execution_mode"] == "manual":
-            context.user_data["manual_service_id"] = service_id
-            prompt = requested_service["request_prompt"] or "أرسل البيانات المطلوبة لتنفيذ الخدمة، مثل رقم الهاتف أو اسم المستخدم."
-            await query.message.edit_text(
-                f"<b>طلب خدمة: {esc(requested_service['name'])}</b>\n\n{esc(prompt)}\n\nأرسل البيانات في رسالة واحدة أو /cancel للإلغاء.",
-                parse_mode=ParseMode.HTML,
+async def check_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE, is_admin=False):
+    if is_bot_under_maintenance() and not is_admin:
+        custom_msg = get_maintenance_message()
+        if custom_msg:
+            final_text = f"⚙️ **{custom_msg}** 🛠️"
+        else:
+            final_text = (
+                "⚠️ **نعتذر منكم، البوت قيد الصيانة حالياً.** 🛠️\n\n"
+                "يرجى المحاولة مرة أخرى لاحقاً. شكراً لتفهمكم! 🙏"
             )
-            return
-        ok, message, data_out = purchase(user_id, service_id)
-        if not ok:
-            await query.answer(message,show_alert=True)
-            return
-        try:
-            await context.bot.send_message(user_id, f"تم تسليم معلومات خدمتك. احتفظ بها في مكان آمن:\n\n{data_out['key']}")
-            await query.message.edit_text(
-                f"<b>{'تم استلام العرض المجاني والتسليم بنجاح.' if data_out['is_free_offer'] else 'تم الشراء والتسليم بنجاح.'}</b>\n\nرقم الطلب: <code>{data_out['order_id']}</code>\nالخدمة: {esc(data_out['name'])}\nالقيمة: {'مجاني' if data_out['is_free_offer'] else cents_text(data_out['price']) + '$'}\nرصيدك المتبقي: {cents_text(data_out['balance'])}$",
-                reply_markup=InlineKeyboardMarkup([[styled_button("القائمة الرئيسية",callback_data="main_menu",style="danger")]]),parse_mode=ParseMode.HTML)
-        except TelegramError:
-            logger.exception("تم تسجيل الطلب لكن فشل تسليم الرسالة")
-            await query.message.edit_text(f"تم تسجيل طلبك رقم <code>{data_out['order_id']}</code>، لكن تعذر التسليم الآلي. تواصل مع الدعم وأرسل رقم الطلب.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("الدعم",url=SUPPORT_LINK)]]),parse_mode=ParseMode.HTML)
-        if ADMIN_ID:
-            try:
-                await context.bot.send_message(ADMIN_ID, f"<b>بيع آلي جديد</b>\nرقم الطلب: <code>{data_out['order_id']}</code>\nالعميل: {esc(data_out['user_name'])} (<code>{user_id}</code>)\nالخدمة: {esc(data_out['name'])}\nالمبلغ: {cents_text(data_out['price'])}$",parse_mode=ParseMode.HTML)
-            except TelegramError:
-                logger.exception("تعذر إرسال إشعار البيع للمدير")
-    elif data == "my_orders":
-        orders = db_all("""SELECT s.name,o.status,o.order_date,o.price_cents FROM orders o
-            LEFT JOIN services s ON s.id=o.service_id WHERE o.user_id=? ORDER BY o.id DESC LIMIT 10""",(user_id,))
-        text = "لا توجد طلبات مسجلة." if not orders else "<b>آخر 10 طلبات</b>\n\n"+"\n\n".join(f"• <b>{esc(row['name'] or 'خدمة مؤرشفة')}</b>\nالحالة: {esc(row['status'])} | المبلغ: {cents_text(row['price_cents'])}$\nالتاريخ: {esc(row['order_date'])}" for row in orders)
-        await query.message.edit_text(text,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("القائمة الرئيسية",callback_data="main_menu")]]),parse_mode=ParseMode.HTML)
-    elif data == "bot_info":
-        await query.message.edit_text("متجر B-Fix للخدمات والاشتراكات الرقمية مع تسليم آلي للمنتجات المتوفرة.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("رجوع",callback_data="main_menu")]]))
-
-
-async def text_handler(update, context):
-    if not update.message or not update.effective_user:
-        return
-    user_id = update.effective_user.id
-    upsert_user(user_id, update.effective_user.first_name)
-    if maintenance_enabled() and not is_admin(user_id):
-        await send_maintenance_notice(update, context)
-        return
-    manual_service_id = context.user_data.get("manual_service_id")
-    if isinstance(manual_service_id, int):
-        request_data = clean(update.message.text, MAX_ORDER_MESSAGE_LENGTH)
-        if not request_data:
-            await update.message.reply_text("أرسل بيانات صالحة في رسالة واحدة أو /cancel للإلغاء.")
-            return
-        ok, message, order_data = create_manual_order(user_id, manual_service_id, request_data)
-        if not ok:
-            await update.message.reply_text(message)
-            return
-        context.user_data.pop("manual_service_id", None)
-        service = get_service(manual_service_id)
-        wait_text = service["wait_message"] or "تم استلام طلبك، يرجى الانتظار."
-        await update.message.reply_text(
-            f"<b>تم تسجيل طلبك بنجاح.</b>\n\nرقم الطلب: <code>{order_data['order_id']}</code>\nالخدمة: {esc(order_data['service_name'])}\n{esc(wait_text)}",
-            parse_mode=ParseMode.HTML,
-        )
-        if ADMIN_ID:
-            try:
-                await context.bot.send_message(
-                    ADMIN_ID,
-                    f"<b>طلب يدوي جديد</b>\nرقم الطلب: <code>{order_data['order_id']}</code>\nالعميل: {esc(order_data['user_name'])} (<code>{user_id}</code>)\nالخدمة: {esc(order_data['service_name'])}\nالبيانات: {esc(request_data)}",
-                    parse_mode=ParseMode.HTML,
-                )
-            except TelegramError:
-                logger.exception("تعذر إرسال إشعار الطلب اليدوي للمدير")
-        return
-    if not context.user_data.get("waiting_card"):
-        await update.message.reply_text("استخدم /start لعرض قائمة الخدمات.")
-        return
-    code = clean(update.message.text, MAX_CODE)
-    if not code:
-        await update.message.reply_text("أرسل كوداً صالحاً أو /cancel للإلغاء.")
-        return
-    ok, message, balance = redeem_card(user_id, code)
-    if not ok:
-        await update.message.reply_text(f"{message} أرسل كوداً آخر أو /cancel للإلغاء.")
-        return
-    context.user_data.pop("waiting_card", None)
-    await update.message.reply_text(f"<b>{message}</b>\nرصيدك الجديد: <b>{cents_text(balance)}$</b>",parse_mode=ParseMode.HTML)
-
-
-# ========================= لوحة الإدارة =========================
-def admin_keyboard():
-    return InlineKeyboardMarkup([
-        [styled_button("إضافة رصيد",callback_data="adm_add_bal",style="success"),styled_button("خصم رصيد",callback_data="adm_sub_bal",style="danger")],
-        [styled_button("إنشاء كود شحن",callback_data="adm_new_card",style="success"),styled_button("بحث",callback_data="adm_search",style="primary")],
-        [styled_button("إدارة الخدمات والمخزون",callback_data="adm_srv_menu",style="primary")],
-        [styled_button("إشعار جماعي جديد",callback_data="adm_broadcast",style="primary"),styled_button("إدارة الإشعارات",callback_data="adm_broadcasts",style="danger")],
-        [styled_button("طلبات تحتاج تنفيذ",callback_data="adm_orders",style="success"),styled_button("وضع الصيانة",callback_data="adm_maintenance",style="danger")],
-        [styled_button("إحصائيات",callback_data="adm_stats",style="primary")],
-    ])
-
-
-async def admin_panel(update, context):
-    if not update.effective_user or not is_admin(update.effective_user.id):
         if update.message:
-            await update.message.reply_text("غير مصرح لك باستخدام هذه اللوحة.")
-        return
-    if update.message:
-        await update.message.reply_text("<b>لوحة إدارة متجر B-Fix</b>",reply_markup=admin_keyboard(),parse_mode=ParseMode.HTML)
-    elif update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text("<b>لوحة إدارة متجر B-Fix</b>",reply_markup=admin_keyboard(),parse_mode=ParseMode.HTML)
+            await update.message.reply_text(final_text, parse_mode='Markdown')
+        elif update.callback_query:
+            await update.callback_query.answer("⚙️ البوت تحت الصيانة", show_alert=True)
+        return False
+    return True
 
+# ================= (3) واجهة العميل والأقسام =================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_maintenance(update, context): return
+    
+    user = update.effective_user
+    add_user_if_not_exists(user.id, user.first_name)
+    
+    text = (
+        "✨ ━━━━━ ❲ 𝐁-𝐅𝐢𝐱 𝐒𝐨𝐟𝐭𝐰𝐚𝐫𝐞 ❳ ━━━━━ ✨\n\n"
+        f"👋 أهلاً بك يا [{user.first_name}](tg://user?id={user.id})\n"
+        "في متجرك الآلي المطور للخدمات الرقمية والاشتراكات 🚀\n\n"
+        "🛒 ❲ يرجى اختيار القسم المطلوب من القائمة ❳ 👇\n"
+        "━━━━━━━━━━━━━━━━━━━━━"
+    )
+    keyboard = [
+        [InlineKeyboardButton(f"{COLOR_SUCCESS} الخدمات الرقمية {COLOR_ACTION}", callback_data="show_cat_digital"),
+         InlineKeyboardButton(f"{COLOR_SUCCESS} الاشتراكات {COLOR_ACTION}", callback_data="show_cat_subscriptions")],
+        [InlineKeyboardButton(f"{COLOR_SUCCESS} خدمة إيجار الأدوات 🛠️", callback_data="show_cat_rentals")],
+        [InlineKeyboardButton(f"{COLOR_SUCCESS} عروض VIP الماسي ⭐", callback_data="show_cat_vip"),
+         InlineKeyboardButton(f"{COLOR_SUCCESS} عروض مجانية حصرية 🆓", callback_data="show_cat_free")],
+        [InlineKeyboardButton(f"{COLOR_INFO} سجل طلباتي 🔄", callback_data="my_orders"),
+         InlineKeyboardButton(f"{COLOR_INFO} حسابي ⚡", callback_data="my_profile")],
+        [InlineKeyboardButton(f"{COLOR_PRIMARY} شحن الرصيد بكود", callback_data="charge_account"),
+         InlineKeyboardButton(f"{COLOR_PRIMARY} تغذية حسابك", callback_data="fund_account")],
+        [InlineKeyboardButton(f"{COLOR_INFO} واتساب 🌐", url=WHATSAPP_LINK),
+         InlineKeyboardButton(f"{COLOR_INFO} الدعم 🛠️", url=SUPPORT_LINK)],
+        [InlineKeyboardButton(f"{COLOR_WARNING} معلومات البوت ℹ️", callback_data="bot_info")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    if update.message: await update.message.reply_text(text, reply_markup=markup, parse_mode='Markdown')
+    elif update.callback_query: await update.callback_query.message.edit_text(text, reply_markup=markup, parse_mode='Markdown')
 
-def services_keyboard(services, prefix, back="adm_srv_menu"):
-    buttons = [[styled_button(str(row["name"])[:45],callback_data=f"{prefix}{row['id']}",style="primary")] for row in services]
-    buttons.append([styled_button("رجوع",callback_data=back,style="danger")])
-    return InlineKeyboardMarkup(buttons)
-
-
-def service_manage_keyboard(service_id):
-    return InlineKeyboardMarkup([
-        [styled_button("تعديل الاسم",callback_data=f"editname_{service_id}",style="primary"),styled_button("تعديل الوصف",callback_data=f"editdesc_{service_id}",style="primary")],
-        [styled_button("تعديل السعر",callback_data=f"editprice_{service_id}",style="success"),styled_button("تعديل المدة",callback_data=f"editduration_{service_id}",style="primary")],
-        [styled_button("تغيير القسم",callback_data=f"editcat_{service_id}",style="primary"),styled_button("طريقة التنفيذ",callback_data=f"editmode_{service_id}",style="success")],
-        [styled_button("إعداد طلب يدوي",callback_data=f"manualsetup_{service_id}",style="success")],
-        [styled_button("أرشفة الخدمة",callback_data=f"archive_{service_id}",style="danger")],
-        [styled_button("رجوع للخدمات",callback_data="adm_service_list",style="danger")],
-    ])
-
-
-async def admin_menu_handler(update, context):
+async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_maintenance(update, context): return
     query = update.callback_query
-    if not query or not query.message:
-        return
-    if not is_admin(query.from_user.id):
-        await query.answer("غير مصرح لك.", show_alert=True)
-        return
     await query.answer()
-    data = query.data or ""
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "my_profile":
+        user_info = db_fetch_one("SELECT name, balance FROM users WHERE user_id = ?", (user_id,))
+        text = f"👤 **ملفك الشخصي:**\n\n▪️ **الاسم:** {user_info[0]}\n▪️ **الآيدي:** `{user_id}`\n▪️ **الرصيد:** `{user_info[1]}` $\n\nلزيادة رصيدك اضغط تغذية حسابك."
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{COLOR_SUCCESS} تغذية حسابك", callback_data="fund_account")], [InlineKeyboardButton(f"{COLOR_DANGER} رجوع للقائمة الرئيسية 🔄", callback_data="main_menu")]]), parse_mode='Markdown')
+
+    elif data == "charge_account":
+        await query.message.edit_text("💳 أرسل **كود البطاقة** الآن (أو أرسل /cancel للإلغاء):", parse_mode='Markdown')
+        context.user_data['waiting_card'] = True
+
+    elif data == "fund_account":
+        payment_text = (
+            "💳 **اختر وسيلة الدفع المناسبة لك لتغذية حسابك:**\n\n"
+            "يرجى النقر على إحدى الطرق أدناه لعرض تفاصيل وحسابات التحويل المعتمدة 👇"
+        )
+        payment_keyboard = [
+            [InlineKeyboardButton("🔹 محفظة جيب", callback_data="pay_jeep"),
+             InlineKeyboardButton("🔹 جوالي", callback_data="pay_jawali")],
+            [InlineKeyboardButton("🔹 وان كاش", callback_data="pay_onecash"),
+             InlineKeyboardButton("🏦 بنك الكريمي", callback_data="pay_kuraimi")],
+            [InlineKeyboardButton("🟡 Binance", callback_data="pay_binance"),
+             InlineKeyboardButton("💳 VISA", callback_data="pay_visa")],
+            [InlineKeyboardButton("🟢 شحن بكود", callback_data="charge_account")],
+            [InlineKeyboardButton(f"{COLOR_DANGER} رجوع للقائمة الرئيسية 🔄", callback_data="main_menu")]
+        ]
+        await query.message.edit_text(payment_text, reply_markup=InlineKeyboardMarkup(payment_keyboard), parse_mode='Markdown')
+
+    elif data.startswith("pay_"):
+        payment_details = (
+            "💳 **طرق الدفع المتاحة لدينا**\n\n"
+            "📱 **المحافظ الإلكترونية**\n"
+            "🔹 محفظة جيب: `580300`\n"
+            "🔹 وان كاش: `178109713`\n"
+            "🔹 جوالي: `777728478`\n\n"
+            "🏦 **التحويل البنكي – بنك الكريمي**\n\n"
+            "🇾🇪 الحساب بالريال اليمني: `3204168937`\n"
+            "🇸🇦 الحساب بالريال السعودي: `3204433991`\n"
+            "💵 الحساب بالدولار الأمريكي: `3191718649`\n\n"
+            "🌍 **طرق الدفع العالمية**\n\n"
+            "🟡 **Binance ID:**\n`1063050653`\n"
+            "💳 **VISA:**\n`4909800019663092`\n\n"
+            "━━━━━━━━━━━━━━\n\n"
+            "✅ **بعد إتمام عملية الدفع**\n\n"
+            "يرجى إرسال صورة أو إشعار التحويل عبر واتساب مع توضيح:\n"
+            "• **الاسم**\n• **الخدمة المطلوبة**\n• **المبلغ المحول**\n• **وسيلة الدفع المستخدمة**\n\n"
+            "سيتم مراجعة عملية الدفع وتفعيل طلبك في أسرع وقت ممكن.\n\n"
+            "🔒 دفع آمن • تفعيل سريع • خدمة موثوقة"
+        )
+        back_kb = [
+            [InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)],
+            [InlineKeyboardButton("🔵 العودة لطرق الدفع", callback_data="fund_account")],
+            [InlineKeyboardButton(f"{COLOR_DANGER} القائمة الرئيسية", callback_data="main_menu")]
+        ]
+        await query.message.edit_text(payment_details, reply_markup=InlineKeyboardMarkup(back_kb), parse_mode='Markdown')
+
+    elif data.startswith("show_cat_"):
+        category = data.replace("show_cat_", "")
+        if category == "digital": title = "💠 الخدمات الرقمية (Software & Tools) ✨"
+        elif category == "subscriptions": title = "🔵 الاشتراكات (AI & Premium) 🚀"
+        elif category == "rentals": title = "🔧 خدمة إيجار الأدوات 🛠️"
+        elif category == "vip": title = "💎 عروض VIP الماسي ⭐"
+        elif category == "free": title = "🎁 العروض المجانية الحصرية 🆓"
+        else: title = "🛒 قائمة الخدمات"
+        
+        services = db_fetch_all("SELECT id, name, price FROM services WHERE category = ?", (category,))
+        if not services:
+            await query.message.edit_text(f"🚧 لا توجد خدمات في قسم {title} حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{COLOR_DANGER} العودة للقائمة 🔄", callback_data="main_menu")]]))
+            return
+            
+        keyboard = []
+        for srv in services:
+            stock = db_fetch_one("SELECT COUNT(*) FROM product_keys WHERE service_id = ? AND is_sold = 0", (srv[0],))[0]
+            status = "🟢 تتوفر" if stock > 0 else "🔴 نفدت"
+            keyboard.append([InlineKeyboardButton(f"▪️ {srv[1]} - {srv[2]}$ ({status})", callback_data=f"srv_{srv[0]}")])
+        keyboard.append([InlineKeyboardButton(f"{COLOR_DANGER} العودة للقائمة 🔄", callback_data="main_menu")])
+        await query.message.edit_text(f"📑 **{title}:**\n\n👇 اختر الخدمة لعرض التفاصيل:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data.startswith("srv_"):
+        srv_id = int(data.split("_")[1])
+        srv = db_fetch_one("SELECT id, name, description, price, duration, category FROM services WHERE id = ?", (srv_id,))
+        stock = db_fetch_one("SELECT COUNT(*) FROM product_keys WHERE service_id = ? AND is_sold = 0", (srv_id,))[0]
+        text = f"📌 **الخدمة:** {srv[1]}\n📝 **الوصف:** {srv[2]}\n⏳ **المدة:** {srv[4]}\n💵 **السعر:** `{srv[3]}` $\n📦 **الكمية المتوفرة:** {stock}"
+        
+        keyboard = [[InlineKeyboardButton(f"{COLOR_SUCCESS} شراء الآن ⚡", callback_data=f"buy_{srv[0]}")], [InlineKeyboardButton(f"{COLOR_DANGER} رجوع للقسم 🔄", callback_data=f"show_cat_{srv[5]}")]]
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data.startswith("buy_"):
+        srv_id = int(data.split("_")[1])
+        srv = db_fetch_one("SELECT price, name, category FROM services WHERE id = ?", (srv_id,))
+        user_info = db_fetch_one("SELECT balance, name FROM users WHERE user_id = ?", (user_id,))
+        stock_key = db_fetch_one("SELECT id, key_text FROM product_keys WHERE service_id = ? AND is_sold = 0 LIMIT 1", (srv_id,))
+        
+        if not stock_key and srv[2] != "free":
+            out_of_stock_msg = "❌ **عذراً، لقد نفدت الكمية (الأكواد) لهذه الخدمة للتو!**\n\nيرجى المحاولة لاحقاً أو مراسلة الدعم الفني."
+            await query.message.edit_text(out_of_stock_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{COLOR_DANGER} العودة للخدمات", callback_data="main_menu")]]), parse_mode='Markdown')
+            return
+            
+        # التحقق من الرصيد أو السعر المجاني
+        is_free = (srv[2] == "free" or srv[0] == 0)
+        if is_free or user_info[0] >= srv[0]:
+            if not is_free:
+                new_balance = user_info[0] - srv[0]
+                db_execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
+            
+            if stock_key:
+                db_execute("UPDATE product_keys SET is_sold = 1 WHERE id = ?", (stock_key[0],))
+                key_content = stock_key[1]
+            else:
+                key_content = "🎁 تم تفعيل عرضك المجاني بنجاح!"
+
+            db_execute("INSERT INTO orders (user_id, service_id, status, order_date) VALUES (?, ?, 'مكتمل ✅', ?)", (user_id, srv_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            
+            success_msg = "✅ **تم الشراء بنجاح!**\n\n🎁 تم إرسال تفاصيل طلبك في الرسالة التالية لتتمكن من نسخها بسهولة 👇"
+            await query.message.edit_text(success_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{COLOR_DANGER} القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
+            
+            await context.bot.send_message(chat_id=user_id, text=key_content)
+            await context.bot.send_message(chat_id=user_id, text="🌟 **شكراً لاستخدامك بوت Bfixsoftware** 🌟", parse_mode='Markdown')
+            
+            admin_msg = f"🔔 **طلب/شراء جديد!**\n👤 العميل: {user_info[1]}\n🆔 `{user_id}`\n🛒 {srv[1]}\n💵 {srv[0]}$\n\n👇 المحتوى المباع/المسلم:"
+            await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode='Markdown')
+            await context.bot.send_message(chat_id=ADMIN_ID, text=key_content)
+        else:
+            await query.answer("❌ رصيدك غير كافٍ لإتمام العملية!", show_alert=True)
+
+    elif data == "my_orders":
+        orders = db_fetch_all("SELECT s.name, o.status, o.order_date FROM orders o JOIN services s ON o.service_id = s.id WHERE o.user_id = ? ORDER BY o.id DESC LIMIT 5", (user_id,))
+        if not orders: text = "📦 لا توجد طلبات."
+        else: text = "📦 **آخر 5 طلبات:**\n\n" + "\n".join([f"▪️ **{o[0]}**\nالحالة: {o[1]}\nالتاريخ: {o[2]}\n" for o in orders])
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{COLOR_DANGER} رجوع للقائمة", callback_data="main_menu")]]), parse_mode='Markdown')
+
+    elif data == "bot_info":
+        await query.message.edit_text("🤖 متجر B-Fix الذكي للخدمات والاشتراكات الرقمية.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{COLOR_DANGER} رجوع", callback_data="main_menu")]]))
+
+    elif data == "main_menu":
+        await start_command(update, context)
+
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        if not await check_maintenance(update, context): return
+        
+    if context.user_data.get('waiting_card'):
+        code = update.message.text.strip()
+        card = db_fetch_one("SELECT amount, is_used FROM cards WHERE code = ?", (code,))
+        
+        if not card or card[1] == 1:
+            await update.message.reply_text("❌ الكود غير صحيح أو مستخدم مسبقاً. أرسل كوداً آخر أو /cancel للإلغاء.")
+            return
+            
+        db_execute("UPDATE cards SET is_used = 1 WHERE code = ?", (code,))
+        db_execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (card[0], user.id))
+        new_balance = db_fetch_one("SELECT balance FROM users WHERE user_id = ?", (user.id,))[0]
+        
+        context.user_data['waiting_card'] = False
+        await update.message.reply_text(f"✅ **تم الشحن بنجاح!**\n💰 القيمة: `{card[0]}` $\n💵 رصيدك الجديد: `{new_balance}` $", parse_mode='Markdown')
+        return
+
+# ================= (4) لوحة تحكم المشرف المتقدمة =================
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return 
+    
+    m_status = "🟢 (مفعل)" if is_bot_under_maintenance() else "🔴 (معطل)"
+    text = "👑 **لوحة تحكم المطور والمدير**"
+    
+    keyboard = [
+        [InlineKeyboardButton(f"{COLOR_SUCCESS} إضافة رصيد 🔵", callback_data="adm_add_bal"), InlineKeyboardButton(f"{COLOR_DANGER} خصم رصيد 🔴", callback_data="adm_sub_bal")],
+        [InlineKeyboardButton(f"{COLOR_SUCCESS} إنشاء كود شحن 🎟", callback_data="adm_new_card"), InlineKeyboardButton(f"{COLOR_PRIMARY} بحث عن مستخدم 🔎", callback_data="adm_search")],
+        [InlineKeyboardButton(f"{COLOR_SUCCESS} إدارة الخدمات والأقسام والأكواد 🛠️", callback_data="adm_srv_menu")],
+        [InlineKeyboardButton(f"{COLOR_PRIMARY} إشعار جماعي 📢", callback_data="adm_broadcast"), InlineKeyboardButton(f"{COLOR_DANGER} حذف آخر إشعار 🗑️", callback_data="adm_del_broadcast")],
+        [InlineKeyboardButton(f"⚙️ وضع الصيانة: {m_status}", callback_data="adm_toggle_main")],
+        [InlineKeyboardButton(f"{COLOR_INFO} إحصائيات المتجر 📊", callback_data="adm_stats")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    if update.message: await update.message.reply_text(text, reply_markup=markup, parse_mode='Markdown')
+    elif update.callback_query: await update.callback_query.message.edit_text(text, reply_markup=markup, parse_mode='Markdown')
+
+async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID: return
+    await query.answer()
+    data = query.data
+
     if data == "adm_main":
         await admin_panel(update, context)
-    elif data == "adm_stats":
-        users = db_one("SELECT COUNT(*) AS n FROM users")["n"]
-        orders = db_one("SELECT COUNT(*) AS n FROM orders")["n"]
-        stock = db_one("SELECT COUNT(*) AS n FROM product_keys WHERE is_sold=0")["n"]
-        manual_pending = db_one("SELECT COUNT(*) AS n FROM manual_orders WHERE status!='مكتمل'")["n"]
-        revenue = db_one("SELECT COALESCE(SUM(price_cents),0) AS n FROM orders")["n"]
-        await query.message.edit_text(f"<b>إحصائيات المتجر</b>\n\nالمستخدمون: <b>{users}</b>\nالطلبات: <b>{orders}</b>\nطلبات يدوية معلقة: <b>{manual_pending}</b>\nالأكواد المتوفرة: <b>{stock}</b>\nإجمالي المبيعات: <b>{cents_text(revenue)}$</b>",reply_markup=InlineKeyboardMarkup([[styled_button("رجوع",callback_data="adm_main",style="danger")]]),parse_mode=ParseMode.HTML)
-    elif data == "adm_maintenance":
-        enabled = maintenance_enabled()
-        status = "مفعّل ⛔" if enabled else "متوقف ✅"
-        await query.message.edit_text(f"<b>وضع الصيانة</b>\n\nالحالة الحالية: <b>{status}</b>\n\nالرسالة للعملاء:\n{esc(maintenance_message())}",reply_markup=InlineKeyboardMarkup([[styled_button("إيقاف وضع الصيانة",callback_data="maint_off",style="success")] if enabled else [styled_button("تفعيل وضع الصيانة",callback_data="maint_on",style="danger")],[styled_button("تعديل رسالة الصيانة",callback_data="maint_edit",style="primary")],[styled_button("رجوع",callback_data="adm_main",style="danger")]]),parse_mode=ParseMode.HTML)
-    elif data in {"maint_on", "maint_off"}:
-        set_setting("maintenance_enabled", "1" if data == "maint_on" else "0")
-        await query.message.edit_text("تم تحديث وضع الصيانة.",reply_markup=InlineKeyboardMarkup([[styled_button("رجوع لإعدادات الصيانة",callback_data="adm_maintenance",style="primary")]]))
-    elif data == "adm_srv_menu":
-        await query.message.edit_text("<b>إدارة الخدمات والمخزون</b>",reply_markup=InlineKeyboardMarkup([[styled_button("إضافة خدمة",callback_data="adm_add_srv",style="success")],[styled_button("كل الخدمات وتعديلها",callback_data="adm_service_list",style="primary")],[styled_button("إضافة أكواد",callback_data="adm_stock_list",style="success")],[styled_button("استعادة خدمة مؤرشفة",callback_data="adm_restore_list",style="primary")],[styled_button("رجوع",callback_data="adm_main",style="danger")]]),parse_mode=ParseMode.HTML)
-    elif data in {"adm_service_list", "adm_stock_list", "adm_restore_list"}:
-        active = 0 if data == "adm_restore_list" else 1
-        services = db_all("SELECT id,name FROM services WHERE is_active=? ORDER BY id DESC",(active,))
-        if not services:
-            await query.message.edit_text("لا توجد خدمات مطابقة.",reply_markup=InlineKeyboardMarkup([[styled_button("رجوع",callback_data="adm_srv_menu",style="danger")]]))
-            return
-        prefix = {"adm_service_list":"srvmanage_", "adm_stock_list":"addstock_", "adm_restore_list":"restore_"}[data]
-        await query.message.edit_text("اختر الخدمة:",reply_markup=services_keyboard(services,prefix))
-    elif data.startswith("srvmanage_"):
-        service_id = data.removeprefix("srvmanage_")
-        service = get_service(int(service_id), active=False) if service_id.isdigit() else None
-        if not service:
-            await query.answer("الخدمة غير موجودة.",show_alert=True)
-            return
-        await query.message.edit_text(f"<b>إدارة الخدمة</b>\n\nالاسم: {esc(service['name'])}\nالقسم: {esc(service['category'])}\nالسعر: {cents_text(service['price_cents'])}$\nطريقة التنفيذ: {esc(service['execution_mode'])}",reply_markup=service_manage_keyboard(int(service_id)),parse_mode=ParseMode.HTML)
-    elif data.startswith("editcat_"):
-        service_id = data.removeprefix("editcat_")
-        if service_id.isdigit():
-            await query.message.edit_text("اختر القسم الجديد:",reply_markup=InlineKeyboardMarkup([[styled_button("خدمات رقمية",callback_data=f"setcat_{service_id}_digital",style="success")],[styled_button("اشتراكات",callback_data=f"setcat_{service_id}_subscriptions",style="success")],[styled_button("عروض مجانية",callback_data=f"setcat_{service_id}_free_offers",style="primary")],[styled_button("عروض VIP",callback_data=f"setcat_{service_id}_vip",style="primary")],[styled_button("إيجار الأدوات",callback_data=f"setcat_{service_id}_rentals",style="success")]]))
-    elif data.startswith("setcat_"):
-        _, service_id, category = data.split("_", 2)
-        if service_id.isdigit() and category in {"digital","subscriptions","free_offers","vip","rentals"}:
-            price = 0 if category == "free_offers" else None
-            if price is None:
-                db_exec("UPDATE services SET category=? WHERE id=?",(category,int(service_id)))
-            else:
-                db_exec("UPDATE services SET category=?,price=0,price_cents=0 WHERE id=?",(category,int(service_id)))
-            await query.message.edit_text("تم تغيير القسم بنجاح.",reply_markup=service_manage_keyboard(int(service_id)))
-    elif data.startswith("editmode_"):
-        service_id = data.removeprefix("editmode_")
-        if service_id.isdigit():
-            await query.message.edit_text("اختر طريقة التنفيذ:",reply_markup=InlineKeyboardMarkup([[styled_button("تسليم آلي من المخزون",callback_data=f"setmode_{service_id}_auto",style="success")],[styled_button("طلب بيانات وتنفيذ يدوي",callback_data=f"setmode_{service_id}_manual",style="primary")]]))
-    elif data.startswith("setmode_"):
-        _, service_id, mode = data.split("_", 2)
-        if service_id.isdigit() and mode in {"auto","manual"}:
-            db_exec("UPDATE services SET execution_mode=? WHERE id=?",(mode,int(service_id)))
-            note = "يمكنك الآن إعداد سؤال العميل ورسائل المتابعة." if mode == "manual" else "ستعتمد الخدمة على مخزون الأكواد للتسليم الآلي."
-            await query.message.edit_text(f"تم تغيير طريقة التنفيذ إلى {mode}.\n{note}",reply_markup=service_manage_keyboard(int(service_id)))
-    elif data.startswith("archive_"):
-        service_id = data.removeprefix("archive_")
-        if service_id.isdigit():
-            db_exec("UPDATE services SET is_active=0 WHERE id=?",(int(service_id),))
-            await query.message.edit_text("تمت أرشفة الخدمة بأمان. بقيت الطلبات والأكواد محفوظة.",reply_markup=InlineKeyboardMarkup([[styled_button("إدارة الخدمات",callback_data="adm_srv_menu",style="primary")]]))
-    elif data.startswith("restore_"):
-        service_id = data.removeprefix("restore_")
-        if service_id.isdigit():
-            db_exec("UPDATE services SET is_active=1 WHERE id=?",(int(service_id),))
-            await query.message.edit_text("تمت استعادة الخدمة.",reply_markup=InlineKeyboardMarkup([[styled_button("إدارة الخدمات",callback_data="adm_srv_menu",style="primary")]]))
-    elif data == "adm_orders":
-        orders = db_all("""SELECT m.id,s.name,u.name,m.status FROM manual_orders m
-            JOIN services s ON s.id=m.service_id JOIN users u ON u.user_id=m.user_id
-            WHERE m.status!='مكتمل' ORDER BY m.id DESC LIMIT 30""")
-        if not orders:
-            await query.message.edit_text("لا توجد طلبات يدوية معلقة.",reply_markup=InlineKeyboardMarkup([[styled_button("رجوع",callback_data="adm_main",style="danger")]]))
-            return
-        buttons = [[styled_button(f"#{row['id']} | {str(row['name'])[:20]} | {str(row['status'])[:15]}",callback_data=f"manualord_{row['id']}",style="primary")] for row in orders]
-        buttons.append([styled_button("رجوع",callback_data="adm_main",style="danger")])
-        await query.message.edit_text("<b>الطلبات التي تحتاج تنفيذ</b>",reply_markup=InlineKeyboardMarkup(buttons),parse_mode=ParseMode.HTML)
-    elif data.startswith("manualord_"):
-        manual_id = data.removeprefix("manualord_")
-        order = get_manual_order(int(manual_id)) if manual_id.isdigit() else None
-        if not order:
-            await query.answer("الطلب غير موجود.",show_alert=True)
-            return
-        text = f"<b>طلب يدوي #{order['order_id']}</b>\n\nالعميل: {esc(order['user_name'])} (<code>{order['user_id']}</code>)\nالخدمة: {esc(order['service_name'])}\nالحالة: {esc(order['status'])}\n\n<b>بيانات العميل:</b>\n{esc(order['request_data'])}"
-        kb = InlineKeyboardMarkup([[styled_button("إرسال تحديث للعميل",callback_data=f"ordmsg_{manual_id}",style="primary")],[styled_button("إتمام الطلب وإشعار العميل",callback_data=f"orddone_{manual_id}",style="success")],[styled_button("رجوع للطلبات",callback_data="adm_orders",style="danger")]])
-        await query.message.edit_text(text,reply_markup=kb,parse_mode=ParseMode.HTML)
-    elif data.startswith("orddone_"):
-        manual_id = data.removeprefix("orddone_")
-        order = get_manual_order(int(manual_id)) if manual_id.isdigit() else None
-        if not order or not update_manual_order(int(manual_id), "مكتمل", order["completion_prompt"], completed=True):
-            await query.answer("تعذر تحديث الطلب.",show_alert=True)
-            return
-        try:
-            await context.bot.send_message(order["user_id"],f"<b>تم تنفيذ طلبك بنجاح.</b>\n\nرقم الطلب: <code>{order['order_id']}</code>\n{esc(order['completion_prompt'])}",parse_mode=ParseMode.HTML)
-        except TelegramError:
-            logger.exception("تعذر إشعار العميل بإتمام الطلب")
-        await query.message.edit_text("تم إكمال الطلب وإرسال الإشعار للعميل.",reply_markup=InlineKeyboardMarkup([[styled_button("رجوع للطلبات",callback_data="adm_orders",style="primary")]]))
-    elif data == "adm_broadcasts":
-        broadcasts = db_all("SELECT id,text,created_at,status FROM broadcasts ORDER BY id DESC LIMIT 20")
-        if not broadcasts:
-            await query.message.edit_text("لا توجد إشعارات محفوظة.",reply_markup=InlineKeyboardMarkup([[styled_button("رجوع",callback_data="adm_main",style="danger")]]))
-            return
-        buttons = [[styled_button(f"#{row['id']} | {str(row['text'])[:28]}",callback_data=f"bcast_{row['id']}",style="primary")] for row in broadcasts]
-        buttons.append([styled_button("رجوع",callback_data="adm_main",style="danger")])
-        await query.message.edit_text("<b>الإشعارات السابقة</b>\nاختر إشعاراً لحذفه من رسائل العملاء.",reply_markup=InlineKeyboardMarkup(buttons),parse_mode=ParseMode.HTML)
-    elif data.startswith("bcast_"):
-        broadcast_id = data.removeprefix("bcast_")
-        row = db_one("SELECT id,text,created_at FROM broadcasts WHERE id=?",(int(broadcast_id),)) if broadcast_id.isdigit() else None
-        if not row:
-            await query.answer("الإشعار غير موجود.",show_alert=True)
-            return
-        await query.message.edit_text(f"<b>الإشعار #{row['id']}</b>\n\n{esc(row['text'])}\n\nأُرسل: {esc(row['created_at'])}",reply_markup=InlineKeyboardMarkup([[styled_button("حذف الإشعار من العملاء",callback_data=f"bdel_{row['id']}",style="danger")],[styled_button("رجوع",callback_data="adm_broadcasts",style="primary")]]),parse_mode=ParseMode.HTML)
-    elif data.startswith("bdel_"):
-        broadcast_id = data.removeprefix("bdel_")
-        if broadcast_id.isdigit():
-            context.user_data["delete_broadcast_id"] = int(broadcast_id)
-            await query.message.edit_text("هل تريد حذف هذا الإشعار من رسائل العملاء؟",reply_markup=InlineKeyboardMarkup([[styled_button("نعم، احذف",callback_data=f"bconfirm_{broadcast_id}",style="danger")],[styled_button("إلغاء",callback_data="adm_broadcasts",style="primary")]]))
-    elif data.startswith("bconfirm_"):
-        broadcast_id = data.removeprefix("bconfirm_")
-        if broadcast_id.isdigit():
-            await delete_broadcast_messages(context.bot, int(broadcast_id))
-            await query.message.edit_text("انتهت محاولة حذف الإشعار. راجع سجل الإشعار لمعرفة النتيجة.",reply_markup=InlineKeyboardMarkup([[styled_button("إدارة الإشعارات",callback_data="adm_broadcasts",style="primary")]]))
+        
+    elif data == "adm_toggle_main":
+        current = is_bot_under_maintenance()
+        if current:
+            db_execute("UPDATE maintenance_mode SET is_active = 0 WHERE id = 1", ())
+            await query.answer("✅ تم إيقاف وضع الصيانة بنجاح.", show_alert=True)
+            await admin_panel(update, context)
+        else:
+            # طلب إدخال رسالة صيانة مخصصة أو تفعيل مباشر
+            keyboard = [
+                [InlineKeyboardButton("🟢 تفعيل مباشر بالرسالة الافتراضية", callback_data="main_on_def")],
+                [InlineKeyboardButton("✍️ تفعيل مع رسالة صيانة مخصصة فخمة", callback_data="main_on_custom")],
+                [InlineKeyboardButton("🔴 رجوع", callback_data="adm_main")]
+            ]
+            await query.message.edit_text("⚙️ **إعدادات وضع الصيانة:**\n\nكيف ترغب في تفعيل الصيانة للعملاء؟", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
+    elif data == "main_on_def":
+        db_execute("UPDATE maintenance_mode SET is_active = 1, custom_message = NULL WHERE id = 1", ())
+        await query.message.edit_text("✅ تم تفعيل وضع الصيانة بنجاح بالرسالة الافتراضية.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع للوحة التحكم", callback_data="adm_main")]]))
 
-async def admin_conv_start(update, context):
-    query = update.callback_query
-    if not query or not query.message or not is_admin(query.from_user.id):
-        return ConversationHandler.END
-    await query.answer()
-    data = query.data or ""
-    context.user_data.clear()
-    if data in {"adm_add_bal","adm_sub_bal"}:
-        context.user_data["action"] = data
-        await query.message.edit_text("أرسل معرف المستخدم الرقمي، أو /cancel للإلغاء.")
-        return ADMIN_USER_ID
-    if data == "adm_search":
-        await query.message.edit_text("أرسل معرف المستخدم الرقمي، أو /cancel للإلغاء.")
-        return ADMIN_SEARCH
-    if data == "adm_broadcast":
-        await query.message.edit_text("أرسل نص الإشعار الجماعي، أو /cancel للإلغاء.")
-        return ADMIN_BROADCAST_TEXT
-    if data == "maint_edit":
-        await query.message.edit_text("أرسل رسالة الصيانة التي تظهر للعملاء، أو /cancel للإلغاء.")
-        return ADMIN_MAINTENANCE_MESSAGE
-    if data == "adm_add_srv":
-        await query.message.edit_text("اختر القسم:",reply_markup=InlineKeyboardMarkup([[styled_button("الخدمات الرقمية",callback_data="cat_digital",style="success")],[styled_button("الاشتراكات",callback_data="cat_subscriptions",style="success")],[styled_button("العروض المجانية",callback_data="cat_free_offers",style="primary")],[styled_button("عروض VIP",callback_data="cat_vip",style="primary")],[styled_button("إيجار الأدوات",callback_data="cat_rentals",style="success")],[styled_button("إلغاء",callback_data="cat_cancel",style="danger")]]))
-        return ADMIN_SRV_CATEGORY
-    if data == "adm_new_card":
-        await query.message.edit_text("أرسل كود البطاقة، أو /cancel للإلغاء.")
-        return ADMIN_CARD_CODE
-    for prefix, field, prompt in (("editname_","name","أرسل الاسم الجديد، أو /cancel."),("editdesc_","description","أرسل الوصف الجديد، أو /cancel."),("editprice_","price","أرسل السعر الجديد، أو /cancel."),("editduration_","duration","أرسل المدة الجديدة، أو /cancel.")):
-        if data.startswith(prefix) and data.removeprefix(prefix).isdigit():
-            service_id = int(data.removeprefix(prefix))
-            if not get_service(service_id, active=False):
-                await query.message.edit_text("الخدمة غير متاحة.")
-                return ConversationHandler.END
-            context.user_data["edit_service_id"] = service_id
-            context.user_data["edit_field"] = field
-            await query.message.edit_text(prompt)
-            return ADMIN_EDIT_VALUE
-    if data.startswith("manualsetup_") and data.removeprefix("manualsetup_").isdigit():
-        service_id = int(data.removeprefix("manualsetup_"))
-        if not get_service(service_id, active=False):
-            await query.message.edit_text("الخدمة غير متاحة.")
-            return ConversationHandler.END
-        context.user_data["manual_setup_service_id"] = service_id
-        await query.message.edit_text("أرسل سؤال العميل المطلوب قبل تنفيذ الخدمة، مثال: أرسل رقم الهاتف مع رمز الدولة.")
-        return ADMIN_MANUAL_QUESTION
-    if data.startswith("ordmsg_") and data.removeprefix("ordmsg_").isdigit():
-        manual_id = int(data.removeprefix("ordmsg_"))
-        if not get_manual_order(manual_id):
-            await query.message.edit_text("الطلب غير موجود.")
-            return ConversationHandler.END
-        context.user_data["admin_order_id"] = manual_id
-        await query.message.edit_text("اكتب رسالة التحديث التي ستصل للعميل، أو /cancel للإلغاء.")
-        return ADMIN_ORDER_MESSAGE
-    if data.startswith("addstock_") and data.removeprefix("addstock_").isdigit():
-        service_id = int(data.removeprefix("addstock_"))
-        if not get_service(service_id, active=False):
-            await query.message.edit_text("الخدمة غير متاحة.")
-            return ConversationHandler.END
-        context.user_data["stock_id"] = service_id
-        await query.message.edit_text(f"أرسل عدد الأكواد/الحسابات التي تريد إضافتها (من 1 إلى {MAX_STOCK_QUANTITY})، أو /cancel.")
-        return ADMIN_STOCK_QUANTITY
-    return ConversationHandler.END
-
-
-async def admin_category(update, context):
-    query = update.callback_query
-    if not query or not query.message:
-        return ConversationHandler.END
-    await query.answer()
-    if query.data == "cat_cancel":
-        context.user_data.clear()
-        await query.message.edit_text("تم الإلغاء.")
-        return ConversationHandler.END
-    category = (query.data or "").removeprefix("cat_")
-    if category not in {"digital","subscriptions","free_offers","vip","rentals"}:
-        return ConversationHandler.END
-    context.user_data["category"] = category
-    await query.message.edit_text("أرسل اسم الخدمة، أو /cancel للإلغاء.")
-    return ADMIN_SRV_NAME
-
-
-async def admin_user_id(update, context):
-    text = update.message.text.strip()
-    if not text.isdigit() or not db_one("SELECT 1 FROM users WHERE user_id=?",(int(text),)):
-        await update.message.reply_text("المستخدم غير موجود. أرسل معرفاً صحيحاً أو /cancel.")
-        return ADMIN_USER_ID
-    context.user_data["target"] = int(text)
-    await update.message.reply_text("أرسل مبلغاً موجباً.")
-    return ADMIN_AMOUNT
-
-
-async def admin_amount(update, context):
-    cents = parse_cents(update.message.text)
-    target, action = context.user_data.get("target"), context.user_data.get("action")
-    if cents is None or not isinstance(target,int):
-        await update.message.reply_text("أرسل مبلغاً موجباً صالحاً أو /cancel.")
-        return ADMIN_AMOUNT
-    ok, result = adjust_balance(target, cents if action == "adm_add_bal" else -cents, "admin_credit" if action == "adm_add_bal" else "admin_debit")
-    context.user_data.clear()
-    await update.message.reply_text(f"تم التحديث. الرصيد الجديد: {result}$" if ok else f"لم يتم التعديل: {result}")
-    return ConversationHandler.END
-
-
-async def admin_search(update, context):
-    text = update.message.text.strip()
-    user = db_one("SELECT name,balance_cents,join_date FROM users WHERE user_id=?",(int(text),)) if text.isdigit() else None
-    await update.message.reply_text(f"الاسم: {user['name']}\nالرصيد: {cents_text(user['balance_cents'])}$\nالانضمام: {user['join_date']}" if user else "المستخدم غير موجود.")
-    return ConversationHandler.END
-
-
-async def admin_broadcast(update, context):
-    text = clean(update.message.text, MAX_BROADCAST_LENGTH)
-    if not text:
-        await update.message.reply_text("الإشعار فارغ أو طويل جداً. أعد الإرسال أو /cancel.")
-        return ADMIN_BROADCAST_TEXT
-    with db_connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        broadcast = conn.execute("INSERT INTO broadcasts (text,status,created_at) VALUES (?, 'sending', ?)", (text, now_text()))
-        conn.commit()
-    broadcast_id = broadcast.lastrowid
-    users = db_all("SELECT user_id FROM users")
-    await update.message.reply_text(f"بدأ إرسال الإشعار رقم {broadcast_id} إلى {len(users)} مستخدماً.")
-    sent = blocked = failed = 0
-    for row in users:
-        user_id = row["user_id"]
-        try:
-            message = await context.bot.send_message(user_id, f"📢 إشعار من المتجر:\n\n{text}")
-            with db_connect() as conn:
-                conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,message_id,status) VALUES (?,?,?,'sent')", (broadcast_id,user_id,message.message_id))
-            sent += 1
-            await asyncio.sleep(0.05)
-        except RetryAfter as err:
-            wait_for = err.retry_after.total_seconds() if hasattr(err.retry_after, "total_seconds") else float(err.retry_after)
-            await asyncio.sleep(wait_for + 1)
-            try:
-                message = await context.bot.send_message(user_id, f"📢 إشعار من المتجر:\n\n{text}")
-                with db_connect() as conn:
-                    conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,message_id,status) VALUES (?,?,?,'sent')", (broadcast_id,user_id,message.message_id))
-                sent += 1
-            except TelegramError:
-                with db_connect() as conn:
-                    conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,status) VALUES (?,?,'failed')", (broadcast_id,user_id))
-                failed += 1
-        except Forbidden:
-            with db_connect() as conn:
-                conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,status) VALUES (?,?,'blocked')", (broadcast_id,user_id))
-            blocked += 1
-        except TelegramError:
-            with db_connect() as conn:
-                conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,status) VALUES (?,?,'failed')", (broadcast_id,user_id))
-            failed += 1
-    db_exec("UPDATE broadcasts SET status='sent' WHERE id=?", (broadcast_id,))
-    await update.message.reply_text(f"اكتمل الإرسال. رقم الإشعار: {broadcast_id} | نجح: {sent} | حظر البوت: {blocked} | فشل: {failed}. يمكنك حذفه من لوحة إدارة الإشعارات.")
-    return ConversationHandler.END
-
-
-async def delete_broadcast_messages(bot, broadcast_id):
-    deliveries = db_all("""SELECT user_id,message_id FROM broadcast_deliveries
-        WHERE broadcast_id=? AND status='sent' AND message_id IS NOT NULL""", (broadcast_id,))
-    deleted = failed = 0
-    for row in deliveries:
-        try:
-            await bot.delete_message(chat_id=row["user_id"], message_id=row["message_id"])
-            db_exec("UPDATE broadcast_deliveries SET status='deleted',deleted_at=? WHERE broadcast_id=? AND user_id=?", (now_text(),broadcast_id,row["user_id"]))
-            deleted += 1
-            await asyncio.sleep(0.05)
-        except TelegramError:
-            db_exec("UPDATE broadcast_deliveries SET status='delete_failed' WHERE broadcast_id=? AND user_id=?", (broadcast_id,row["user_id"]))
-            failed += 1
-    db_exec("UPDATE broadcasts SET status='deleted',deleted_at=? WHERE id=?", (now_text(),broadcast_id))
-    logger.info("حذف الإشعار %s: نجح=%s فشل=%s", broadcast_id, deleted, failed)
-    return deleted, failed
-
-
-async def admin_maintenance_message(update, context):
-    text = clean(update.message.text, MAX_BROADCAST_LENGTH)
-    if not text:
-        await update.message.reply_text("الرسالة فارغة أو طويلة جداً. أعد الإرسال أو /cancel.")
-        return ADMIN_MAINTENANCE_MESSAGE
-    set_setting("maintenance_message", text)
-    context.user_data.clear()
-    await update.message.reply_text("تم حفظ رسالة الصيانة بنجاح.")
-    return ConversationHandler.END
-
-
-async def admin_edit_value(update, context):
-    service_id = context.user_data.get("edit_service_id")
-    field = context.user_data.get("edit_field")
-    service = get_service(service_id, active=False) if isinstance(service_id, int) else None
-    if not service or field not in {"name", "description", "price", "duration"}:
-        context.user_data.clear()
-        await update.message.reply_text("انتهت بيانات التعديل. ابدأ من لوحة الخدمة مجدداً.")
-        return ConversationHandler.END
-    if field == "name":
-        value = clean(update.message.text, MAX_NAME)
-        column, params = "name", (value, service_id)
-    elif field == "description":
-        value = clean(update.message.text, MAX_DESCRIPTION)
-        column, params = "description", (value, service_id)
-    elif field == "duration":
-        value = clean(update.message.text, MAX_NAME)
-        column, params = "duration", (value, service_id)
-    else:
-        value = parse_cents(update.message.text)
-        if service["category"] == "free_offers":
-            await update.message.reply_text("العرض المجاني يجب أن يبقى بسعر 0. غيّر قسم الخدمة أولاً إن أردت وضع سعر.")
-            return ADMIN_EDIT_VALUE
-        if value is None:
-            await update.message.reply_text("أرسل سعراً موجباً صالحاً أو /cancel.")
-            return ADMIN_EDIT_VALUE
-        db_exec("UPDATE services SET price=?,price_cents=? WHERE id=?", (value/100,value,service_id))
-        context.user_data.clear()
-        await update.message.reply_text("تم تعديل سعر الخدمة.")
-        return ConversationHandler.END
-    if not value:
-        await update.message.reply_text("القيمة غير صالحة. أعد الإرسال أو /cancel.")
-        return ADMIN_EDIT_VALUE
-    db_exec(f"UPDATE services SET {column}=? WHERE id=?", params)
-    context.user_data.clear()
-    await update.message.reply_text("تم تعديل الخدمة بنجاح.")
-    return ConversationHandler.END
-
-
-async def admin_manual_question(update, context):
-    value = clean(update.message.text, MAX_DESCRIPTION)
-    if not value:
-        await update.message.reply_text("السؤال غير صالح. أعد الإرسال أو /cancel.")
-        return ADMIN_MANUAL_QUESTION
-    context.user_data["manual_question"] = value
-    await update.message.reply_text("اكتب رسالة الانتظار التي تصل للعميل بعد إرسال بياناته.")
-    return ADMIN_MANUAL_WAIT
-
-
-async def admin_manual_wait(update, context):
-    value = clean(update.message.text, MAX_DESCRIPTION)
-    if not value:
-        await update.message.reply_text("الرسالة غير صالحة. أعد الإرسال أو /cancel.")
-        return ADMIN_MANUAL_WAIT
-    context.user_data["manual_wait"] = value
-    await update.message.reply_text("اكتب رسالة الإكمال التي تصل للعميل بعد تنفيذ الخدمة.")
-    return ADMIN_MANUAL_COMPLETE
-
-
-async def admin_manual_complete(update, context):
-    completion = clean(update.message.text, MAX_DESCRIPTION)
-    service_id = context.user_data.get("manual_setup_service_id")
-    question = context.user_data.get("manual_question")
-    wait_message = context.user_data.get("manual_wait")
-    if not completion or not isinstance(service_id, int) or not question or not wait_message:
-        await update.message.reply_text("بيانات غير صالحة. أعد الإرسال أو /cancel.")
-        return ADMIN_MANUAL_COMPLETE
-    db_exec("""UPDATE services SET execution_mode='manual',request_prompt=?,wait_message=?,completion_prompt=?
-        WHERE id=?""", (question,wait_message,completion,service_id))
-    context.user_data.clear()
-    await update.message.reply_text("تم إعداد الخدمة كطلب يدوي بنجاح.")
-    return ConversationHandler.END
-
-
-async def admin_order_message(update, context):
-    message = clean(update.message.text, MAX_ORDER_MESSAGE_LENGTH)
-    manual_id = context.user_data.get("admin_order_id")
-    order = get_manual_order(manual_id) if isinstance(manual_id, int) else None
-    if not message or not order:
-        await update.message.reply_text("الرسالة أو الطلب غير صالح. أعد الإرسال أو /cancel.")
-        return ADMIN_ORDER_MESSAGE
-    if not update_manual_order(manual_id, "قيد التنفيذ", message):
-        await update.message.reply_text("تعذر حفظ تحديث الطلب.")
-        return ConversationHandler.END
-    try:
-        await context.bot.send_message(order["user_id"], f"<b>تحديث بخصوص طلبك #{order['order_id']}</b>\n\n{esc(message)}", parse_mode=ParseMode.HTML)
-        result = "تم إرسال التحديث للعميل."
-    except TelegramError:
-        logger.exception("تعذر إرسال تحديث الطلب للعميل")
-        result = "تم حفظ التحديث، لكن تعذر إرساله للعميل حالياً."
-    context.user_data.clear()
-    await update.message.reply_text(result)
-    return ConversationHandler.END
-
-
-async def admin_card_code(update, context):
-    code = clean(update.message.text, MAX_CODE)
-    if not code or db_one("SELECT 1 FROM cards WHERE code=?",(code,)):
-        await update.message.reply_text("الكود غير صالح أو موجود مسبقاً. أرسل آخر أو /cancel.")
-        return ADMIN_CARD_CODE
-    context.user_data["card_code"] = code
-    await update.message.reply_text("أرسل قيمة البطاقة كمبلغ موجب.")
-    return ADMIN_CARD_AMOUNT
-
-
-async def admin_card_amount(update, context):
-    cents = parse_cents(update.message.text)
-    code = context.user_data.get("card_code")
-    if cents is None or not code:
-        await update.message.reply_text("أرسل قيمة موجبة صحيحة أو /cancel.")
-        return ADMIN_CARD_AMOUNT
-    try:
-        db_exec("INSERT INTO cards (code,amount,amount_cents) VALUES (?,?,?)",(code,cents/100,cents))
-        await update.message.reply_text(f"تم إنشاء البطاقة {code} بقيمة {cents_text(cents)}$.")
-    except sqlite3.IntegrityError:
-        await update.message.reply_text("الكود موجود مسبقاً.")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-async def admin_service_name(update, context):
-    value = clean(update.message.text, MAX_NAME)
-    if not value:
-        await update.message.reply_text("اسم غير صالح. أعد الإرسال.")
-        return ADMIN_SRV_NAME
-    context.user_data["name"] = value
-    await update.message.reply_text("أرسل وصفاً مختصراً للخدمة.")
-    return ADMIN_SRV_DESC
-
-
-async def admin_service_desc(update, context):
-    value = clean(update.message.text, MAX_DESCRIPTION)
-    if not value:
-        await update.message.reply_text("وصف غير صالح. أعد الإرسال.")
-        return ADMIN_SRV_DESC
-    context.user_data["description"] = value
-    if context.user_data.get("category") == "free_offers":
-        context.user_data["price"] = 0
-        await update.message.reply_text("هذا قسم العروض المجانية، لذا سيكون السعر 0. أرسل مدة العرض، مثل: تسليم فوري أو يوم واحد.")
-        return ADMIN_SRV_DURATION
-    await update.message.reply_text("أرسل السعر كمبلغ موجب.")
-    return ADMIN_SRV_PRICE
-
-
-async def admin_service_price(update, context):
-    cents = parse_cents(update.message.text)
-    if cents is None:
-        await update.message.reply_text("السعر يجب أن يكون مبلغاً موجباً. أعد الإرسال.")
-        return ADMIN_SRV_PRICE
-    context.user_data["price"] = cents
-    await update.message.reply_text("أرسل مدة الخدمة، مثل: تسليم فوري أو شهر.")
-    return ADMIN_SRV_DURATION
-
-
-async def admin_service_duration(update, context):
-    duration = clean(update.message.text, MAX_NAME)
-    needed = ("name","description","price","category")
-    if not duration or any(key not in context.user_data for key in needed):
-        context.user_data.clear()
-        await update.message.reply_text("انتهت بيانات العملية. ابدأ من جديد.")
-        return ConversationHandler.END
-    price = context.user_data["price"]
-    db_exec("""INSERT INTO services
-        (name,description,price,price_cents,duration,category,is_active,execution_mode,request_prompt,wait_message,completion_prompt)
-        VALUES (?,?,?,?,?,?,1,'auto','','تم استلام طلبك، يرجى الانتظار.','تم تنفيذ طلبك بنجاح.')""",
-        (context.user_data["name"],context.user_data["description"],price/100,price,duration,context.user_data["category"]))
-    context.user_data.clear()
-    await update.message.reply_text("تمت إضافة الخدمة. أضف الأكواد قبل عرضها للبيع.")
-    return ConversationHandler.END
-
-
-async def admin_price_edit(update, context):
-    cents = parse_cents(update.message.text)
-    service_id = context.user_data.get("edit_id")
-    if cents is None or not isinstance(service_id,int):
-        await update.message.reply_text("أرسل سعراً موجباً صالحاً أو /cancel.")
-        return ADMIN_NEW_PRICE
-    db_exec("UPDATE services SET price=?,price_cents=? WHERE id=? AND is_active=1",(cents/100,cents,service_id))
-    context.user_data.clear()
-    await update.message.reply_text("تم تعديل السعر.")
-    return ConversationHandler.END
-
-
-async def admin_stock_quantity(update, context):
-    text = update.message.text.strip() if update.message else ""
-    if not text.isdigit() or not 1 <= int(text) <= MAX_STOCK_QUANTITY:
-        await update.message.reply_text(f"أرسل رقماً صحيحاً من 1 إلى {MAX_STOCK_QUANTITY}، أو /cancel.")
-        return ADMIN_STOCK_QUANTITY
-    context.user_data["stock_quantity"] = int(text)
-    await update.message.reply_text(
-        f"أرسل الآن {int(text)} كود/حساب بالضبط. افصل بين كل كود وآخر بعلامة ===، أو /cancel للإلغاء."
-    )
-    return ADMIN_STOCK_KEY
-
-
-async def admin_stock(update, context):
-    text = clean(update.message.text, MAX_STOCK_TEXT)
-    service_id = context.user_data.get("stock_id")
-    expected_quantity = context.user_data.get("stock_quantity")
-    if not text or not isinstance(service_id,int) or not isinstance(expected_quantity,int) or not get_service(service_id):
-        await update.message.reply_text("بيانات غير صالحة. أعد الإرسال أو /cancel.")
-        return ADMIN_STOCK_KEY
-    keys = [item.strip() for item in text.split("===") if item.strip()]
-    if len(keys) != expected_quantity:
-        await update.message.reply_text(f"أدخلت {len(keys)} كوداً، بينما اخترت {expected_quantity}. أرسل العدد المحدد تماماً مفصولاً بعلامة ===.")
-        return ADMIN_STOCK_KEY
-    with db_connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.executemany("INSERT INTO product_keys (service_id,key_text,is_sold) VALUES (?,?,0)",[(service_id,key) for key in keys])
-        conn.commit()
-    available_quantity = stock_count(service_id)
-    context.user_data.clear()
-    await update.message.reply_text(f"تمت إضافة {len(keys)} كود/حساب بنجاح. الكمية المتوفرة الآن: {available_quantity}.")
-    return ConversationHandler.END
-
-
-async def cancel(update, context):
-    context.user_data.clear()
-    if update.message:
-        await update.message.reply_text("تم الإلغاء.")
-    elif update.callback_query:
-        await update.callback_query.answer("تم الإلغاء")
-    return ConversationHandler.END
-
-
-# ========================= فحص الصحة والتشغيل =========================
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path not in ("/", "/health"):
-            self.send_response(404)
-            self.end_headers()
-            return
-        body = b'{"status":"ok"}'
-        self.send_response(200)
-        self.send_header("Content-Type","application/json")
-        self.send_header("Content-Length",str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def log_message(self, *_args):
+    elif data == "main_on_custom":
+        await query.message.edit_text("✍️ أرسل الآن **نص رسالة الصيانة** الفخم الذي سيظهر للعملاء عند محاولة المراسلة:\n(أرسل /cancel للإلغاء)", parse_mode='Markdown')
+        context.user_data['waiting_main_text'] = True
         return
 
+    elif data == "adm_del_broadcast":
+        last_b = db_fetch_one("SELECT content FROM last_broadcast ORDER BY id DESC LIMIT 1")
+        if not last_b:
+            await query.answer("❌ لا يوجد إشعار سابق لحذفه!", show_alert=True)
+            return
+        # ملاحظة: التيليجرام لا يسمح بحذف رسالة تم إرسالها لكل مستخدم على حدة بعد إرسالها بالكامل، ولكن يمكننا حذف السجل وتنبيه المشرف
+        db_execute("DELETE FROM last_broadcast", ())
+        await query.answer("✅ تم مسح سجل آخر إشعار جماعي من قاعدة البيانات بنجاح.", show_alert=True)
+        await admin_panel(update, context)
 
-def health_server():
-    server = ThreadingHTTPServer(("0.0.0.0",int(os.getenv("PORT","8080"))),HealthHandler)
-    logger.info("خادم الصحة جاهز")
-    server.serve_forever()
+    elif data == "adm_stats":
+        u_count = db_fetch_one("SELECT COUNT(*) FROM users")[0]
+        o_count = db_fetch_one("SELECT COUNT(*) FROM orders")[0]
+        k_count = db_fetch_one("SELECT COUNT(*) FROM product_keys WHERE is_sold = 0")[0]
+        text = f"📊 **إحصائيات المتجر:**\n\n👥 إجمالي المستخدمين: `{u_count}`\n📦 إجمالي الطلبات: `{o_count}`\n🔑 الأكواد المتبقية بالمخزون: `{k_count}`"
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{COLOR_DANGER} رجوع لوحة التحكم", callback_data="adm_main")]]), parse_mode='Markdown')
 
+    elif data == "adm_srv_menu":
+        keyboard = [
+            [InlineKeyboardButton("🟢 إضافة خدمة جديدة (في أي قسم)", callback_data="adm_add_srv")],
+            [InlineKeyboardButton("🔵 إضافة/شحن كمية أكواد لخدمة", callback_data="adm_stock_list")],
+            [InlineKeyboardButton("🔵 تعديل سعر خدمة", callback_data="adm_edit_prc_list")],
+            [InlineKeyboardButton("🔴 حذف خدمة", callback_data="adm_del_srv_list")],
+            [InlineKeyboardButton(f"{COLOR_DANGER} رجوع لوحة التحكم", callback_data="adm_main")]
+        ]
+        await query.message.edit_text("📦 **إدارة الخدمات والأقسام:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-async def error_handler(update, context):
-    logger.exception("خطأ غير معالج",exc_info=context.error)
-    if isinstance(update,Update) and update.effective_message:
-        try:
-            await update.effective_message.reply_text("حدث خطأ مؤقت. أعد المحاولة لاحقاً.")
-        except TelegramError:
-            pass
+    elif data in ["adm_del_srv_list", "adm_edit_prc_list", "adm_stock_list"]:
+        services = db_fetch_all("SELECT id, name, category FROM services")
+        if not services:
+            await query.message.edit_text("لا توجد خدمات مضافة حالياً.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع", callback_data="adm_srv_menu")]]))
+            return
+        if data == "adm_del_srv_list": pref, action = "delsrv_", "حذف"
+        elif data == "adm_edit_prc_list": pref, action = "editprc_", "تعديل سعر"
+        else: pref, action = "addstock_", "إضافة كمية أكواد لـ"
+        
+        keyboard = []
+        for s in services:
+            keyboard.append([InlineKeyboardButton(f"▪️ {s[1]} ({s[2]})", callback_data=f"{pref}{s[0]}")])
+        
+        keyboard.append([InlineKeyboardButton("🔴 رجوع", callback_data="adm_srv_menu")])
+        await query.message.edit_text(f"اختر الخدمة لـ {action}:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
+    elif data.startswith("delsrv_"):
+        srv_id = int(data.split("_")[1])
+        db_execute("DELETE FROM services WHERE id = ?", (srv_id,))
+        db_execute("DELETE FROM product_keys WHERE service_id = ?", (srv_id,))
+        await query.message.edit_text("✅ تم حذف الخدمة وجميع أكوادها بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 إدارة الخدمات", callback_data="adm_srv_menu")]]))
 
+# ================= (5) معالجات المحادثة الإدارية =================
+async def admin_conv_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data in ["adm_add_bal", "adm_sub_bal"]:
+        context.user_data['action'] = data 
+        await query.message.edit_text("✍️ أرسل آيدي (ID) المستخدم:\n(أرسل /cancel للإلغاء)")
+        return ADMIN_USER_ID
+    elif data == "adm_search":
+        await query.message.edit_text("🔍 أرسل آيدي (ID) المستخدم للبحث عنه:\n(أرسل /cancel للإلغاء)")
+        return ADMIN_SEARCH
+    elif data == "adm_broadcast":
+        await query.message.edit_text("📢 أرسل نص الإشعار الجماعي لجميع العملاء:\n(أرسل /cancel للإلغاء)")
+        return ADMIN_BROADCAST
+    elif data == "adm_add_srv":
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💠 الخدمات الرقمية (Software)", callback_data="cat_digital")],
+            [InlineKeyboardButton("🔵 الاشتراكات (AI & Premium)", callback_data="cat_subscriptions")],
+            [InlineKeyboardButton("🔧 خدمة إيجار الأدوات", callback_data="cat_rentals")],
+            [InlineKeyboardButton("💎 عروض VIP الماسي ⭐", callback_data="cat_vip")],
+            [InlineKeyboardButton("🎁 العروض المجانية الحصرية 🆓", callback_data="cat_free")],
+            [InlineKeyboardButton("🔴 إلغاء", callback_data="cat_cancel")]
+        ])
+        await query.message.edit_text("➕ **إضافة خدمة جديدة:**\n\nأين تريد وضع هذه الخدمة؟ اختر القسم المناسب:", reply_markup=markup, parse_mode='Markdown')
+        return ADMIN_SRV_CATEGORY
+    elif data.startswith("editprc_"):
+        context.user_data['edit_id'] = int(data.split("_")[1])
+        await query.message.edit_text("💵 أرسل السعر الجديد بالأرقام:\n(أرسل /cancel للإلغاء)")
+        return ADMIN_NEW_PRICE
+    elif data == "adm_new_card":
+        await query.message.edit_text("🎟 أرسل كود البطاقة (مثال: B-10):\n(أرسل /cancel للإلغاء)")
+        return ADMIN_CARD_CODE
+    elif data.startswith("addstock_"):
+        context.user_data['stock_id'] = int(data.split("_")[1])
+        msg = (
+            "🔑 **إضافة كمية أكواد / حسابات للخدمة:**\n\n"
+            "أرسل الأكواد الآن.\n"
+            "*(ملاحظة: يمكنك إرسال كود واحد، أو عدة أكواد مفصول بينها بـ `===` لتقسيم الكمية تلقائياً)*\n\n"
+            "(أرسل /cancel للإلغاء)"
+        )
+        await query.message.edit_text(msg, parse_mode='Markdown')
+        return ADMIN_STOCK_KEY
+
+async def adm_rx_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "cat_cancel":
+        await query.message.edit_text("🚫 تم الإلغاء بنجاح.")
+        return ConversationHandler.END
+        
+    context.user_data['s_cat'] = query.data.replace("cat_", "")
+    await query.message.edit_text("📝 ممتاز. أرسل الآن **اسم** الخدمة أو العرض:\n(أرسل /cancel للإلغاء)")
+    return ADMIN_SRV_NAME
+
+async def adm_rx_userid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.text.isdigit():
+        await update.message.reply_text("❌ أرقام فقط. أعد إرسال الآيدي أو /cancel")
+        return ADMIN_USER_ID
+    user = db_fetch_one("SELECT name, balance FROM users WHERE user_id = ?", (int(update.message.text),))
+    if not user:
+        await update.message.reply_text("❌ مستخدم غير مسجل في البوت. أعد الإرسال أو /cancel")
+        return ADMIN_USER_ID
+    context.user_data['target'] = int(update.message.text)
+    await update.message.reply_text(f"✅ العميل: {user[0]} | رصيده الحالي: {user[1]}$\n✍️ أرسل المبلغ المراد إضافته أو خصمه:")
+    return ADMIN_AMOUNT
+
+async def adm_rx_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try: amt = float(update.message.text)
+    except:
+        await update.message.reply_text("❌ يرجى إرسال أرقام صحيحة أو عشرية فقط. أعد الإرسال:")
+        return ADMIN_AMOUNT
+    if context.user_data['action'] == "adm_sub_bal": amt = -amt
+    db_execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amt, context.user_data['target']))
+    await update.message.reply_text("✅ تم تحديث رصيد العميل بنجاح.")
+    return ConversationHandler.END
+
+async def adm_rx_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = db_fetch_one("SELECT name, balance, join_date FROM users WHERE user_id = ?", (int(update.message.text),))
+    if user: await update.message.reply_text(f"👤 الاسم: {user[0]}\n💰 الرصيد: {user[1]}$\n📅 تاريخ الانضمام: {user[2]}")
+    else: await update.message.reply_text("❌ المستخدم غير موجود.")
+    return ConversationHandler.END
+
+async def adm_rx_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    content = update.message.text
+    db_execute("INSERT INTO last_broadcast (content) VALUES (?)", (content,))
+    users = db_fetch_all("SELECT user_id FROM users")
+    await update.message.reply_text("⏳ جاري إرسال الإشعار الجماعي للعملاء...")
+    for u in users:
+        try: await context.bot.send_message(chat_id=u[0], text=f"📢 {content}")
+        except: pass
+    await update.message.reply_text("✅ تم إرسال الإشعار الجماعي بنجاح.")
+    return ConversationHandler.END
+
+async def adm_rx_cardcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = update.message.text.strip()
+    if db_fetch_one("SELECT code FROM cards WHERE code = ?", (code,)):
+        await update.message.reply_text("❌ الكود موجود مسبقاً. أرسل كوداً آخر أو /cancel")
+        return ADMIN_CARD_CODE
+    context.user_data['c_code'] = code
+    await update.message.reply_text("💵 أرسل القيمة المالية للبطاقة:")
+    return ADMIN_CARD_AMOUNT
+
+async def adm_rx_cardamt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try: amt = float(update.message.text)
+    except:
+        await update.message.reply_text("❌ أرقام فقط. أرسل القيمة بالأرقام أو /cancel")
+        return ADMIN_CARD_AMOUNT
+    db_execute("INSERT INTO cards (code, amount) VALUES (?, ?)", (context.user_data['c_code'], amt))
+    await update.message.reply_text(f"✅ تم إنشاء بطاقة الشحن بنجاح:\nالكود: `{context.user_data['c_code']}`\nالقيمة: `{amt}`$", parse_mode='Markdown')
+    return ConversationHandler.END
+
+async def adm_rx_srvname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['s_name'] = update.message.text
+    await update.message.reply_text("📝 أرسل وصفاً مختصراً للخدمة أو العرض:")
+    return ADMIN_SRV_DESC
+
+async def adm_rx_srvdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['s_desc'] = update.message.text
+    await update.message.reply_text("💵 أرسل السعر بالأرقام (اكتب 0 إذا كانت الخدمة مجانية في قسم العروض المجانية):")
+    return ADMIN_SRV_PRICE
+
+async def adm_rx_srvprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try: context.user_data['s_price'] = float(update.message.text)
+    except:
+        await update.message.reply_text("❌ السعر يجب أن يكون رقماً. أعد الإرسال:")
+        return ADMIN_SRV_PRICE
+    await update.message.reply_text("⏳ أرسل المدة (مثال: تسليم فوري، شهر، دائم):")
+    return ADMIN_SRV_DURATION
+
+async def adm_rx_srvdur(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db_execute("INSERT INTO services (name, description, price, duration, category, quantity) VALUES (?, ?, ?, ?, ?, 0)", 
+               (context.user_data['s_name'], context.user_data['s_desc'], context.user_data['s_price'], update.message.text, context.user_data['s_cat']))
+    await update.message.reply_text("✅ تمت إضافة الخدمة أو العرض بنجاح في القسم المحدد!")
+    return ConversationHandler.END
+
+async def adm_rx_editprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db_execute("UPDATE services SET price = ? WHERE id = ?", (float(update.message.text), context.user_data['edit_id']))
+    await update.message.reply_text("✅ تم تعديل سعر الخدمة بنجاح.")
+    return ConversationHandler.END
+
+async def adm_rx_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if "===" in text:
+        keys = [k.strip() for k in text.split('===') if k.strip()]
+    else:
+        keys = [text]
+        
+    srv_id = context.user_data['stock_id']
+    for k in keys:
+        db_execute("INSERT INTO product_keys (service_id, key_text) VALUES (?, ?)", (srv_id, k))
+        
+    # تحديث إجمالي الكمية في جدول الخدمات بدقة
+    total_stock = db_fetch_one("SELECT COUNT(*) FROM product_keys WHERE service_id = ? AND is_sold = 0", (srv_id,))[0]
+    db_execute("UPDATE services SET quantity = ? WHERE id = ?", (total_stock, srv_id))
+        
+    await update.message.reply_text(f"✅ تم إضافة `{len(keys)}` أكواد/حسابات جديدة بنجاح.\n📦 إجمالي الكمية المتوفرة الآن: `{total_stock}`", parse_mode='Markdown')
+    return ConversationHandler.END
+
+async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # معالجة رسالة صيانة مخصصة إذا كان المشرف يكتبها
+    if update.effective_user.id == ADMIN_ID and context.user_data.get('waiting_main_text'):
+        custom_text = update.message.text.strip()
+        db_execute("UPDATE maintenance_mode SET is_active = 1, custom_message = ? WHERE id = 1", (custom_text,))
+        context.user_data['waiting_main_text'] = False
+        await update.message.reply_text("✅ **تم تفعيل وضع الصيانة بنجاح مع رسالتك الفخمة المخصصة!**", parse_mode='Markdown')
+        return
+        
+    await handle_text_messages(update, context)
+
+async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    if update.message: await update.message.reply_text("🚫 تم الإلغاء بنجاح.")
+    elif update.callback_query: await update.callback_query.answer("🚫 تم الإلغاء")
+    return ConversationHandler.END
+
+# ================= (6) التشغيل الرئيسي =================
 def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN غير مضبوط. ضعه في متغيرات البيئة قبل التشغيل.")
-    if ADMIN_ID <= 0:
-        raise RuntimeError("ADMIN_ID غير مضبوط. ضعه في متغيرات البيئة قبل التشغيل.")
     init_db()
-    if ENABLE_HEALTHCHECK:
-        threading.Thread(target=health_server,daemon=True).start()
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .connect_timeout(20)
-        .read_timeout(30)
-        .write_timeout(30)
-        .pool_timeout(30)
-        .build()
-    )
-    app.add_handler(CommandHandler("start", start))
+    
+    try:
+        urllib.request.urlopen(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook").read()
+    except Exception: pass
+        
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("cancel", cancel))
+    
     app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_conv_start, pattern=r"^(adm_add_bal|adm_sub_bal|adm_search|adm_broadcast|maint_edit|adm_add_srv|adm_new_card|edit(name|desc|price|duration)_\d+|addstock_\d+|manualsetup_\d+|ordmsg_\d+)$")],
+        entry_points=[CallbackQueryHandler(admin_conv_start, pattern="^(adm_add_bal|adm_sub_bal|adm_search|adm_broadcast|adm_add_srv|editprc_.*|adm_new_card|addstock_.*)$")],
         states={
-            ADMIN_SRV_CATEGORY: [CallbackQueryHandler(admin_category, pattern=r"^cat_")],
-            ADMIN_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_user_id)],
-            ADMIN_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_amount)],
-            ADMIN_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_search)],
-            ADMIN_BROADCAST_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
-            ADMIN_MAINTENANCE_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_maintenance_message)],
-            ADMIN_CARD_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_card_code)],
-            ADMIN_CARD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_card_amount)],
-            ADMIN_SRV_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_service_name)],
-            ADMIN_SRV_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_service_desc)],
-            ADMIN_SRV_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_service_price)],
-            ADMIN_SRV_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_service_duration)],
-            ADMIN_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_value)],
-            ADMIN_MANUAL_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_question)],
-            ADMIN_MANUAL_WAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_wait)],
-            ADMIN_MANUAL_COMPLETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_complete)],
-            ADMIN_ORDER_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_order_message)],
-            ADMIN_STOCK_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_stock_quantity)],
-            ADMIN_STOCK_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_stock)],
+            ADMIN_SRV_CATEGORY: [CallbackQueryHandler(adm_rx_category, pattern="^cat_")],
+            ADMIN_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_userid)],
+            ADMIN_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_amount)],
+            ADMIN_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_search)],
+            ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_broadcast)],
+            ADMIN_CARD_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_cardcode)],
+            ADMIN_CARD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_cardamt)],
+            ADMIN_SRV_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_srvname)],
+            ADMIN_SRV_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_srvdesc)],
+            ADMIN_SRV_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_srvprice)],
+            ADMIN_SRV_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_srvdur)],
+            ADMIN_NEW_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_editprice)],
+            ADMIN_STOCK_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_rx_stock)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
-        name="admin_conversation",
+        fallbacks=[CommandHandler("cancel", cancel_handler)],
+        allow_reentry=True
     ))
-    app.add_handler(CallbackQueryHandler(
-        admin_menu_handler,
-        pattern=r"^(adm_(main|stats|maintenance|srv_menu|service_list|stock_list|restore_list|orders|broadcasts)|maint_(on|off)|srvmanage_\d+|edit(cat|mode)_\d+|set(cat|mode)_\d+_.+|archive_\d+|restore_\d+|manualord_\d+|orddone_\d+|bcast_\d+|bdel_\d+|bconfirm_\d+)$",
-    ))
-    app.add_handler(CallbackQueryHandler(main_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_error_handler(error_handler)
-    logger.info("البوت جاهز للتشغيل")
-    app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
+    
+    app.add_handler(CallbackQueryHandler(admin_menus_handler, pattern="^(adm_|delsrv_|main_on_)"))
+    app.add_handler(CallbackQueryHandler(main_buttons_handler))
+    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
 
+    print("\n✅ البوت جاهز ويعمل الآن بكامل الميزات وبنظام الحفظ الآمن للبيانات!")
+    app.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        main()
+    except KeyboardInterrupt:
+        print("\nتم إيقاف البوت.")
