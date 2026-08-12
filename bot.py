@@ -23,8 +23,8 @@ from telegram.ext import (
 )
 
 # لا تضع التوكن أو بيانات الدفع في هذا الملف. أضفها كمتغيرات بيئية عند التشغيل.
-BOT_TOKEN = os.getenv("8299192931:AAHkXI_BLyoAp8TvrSCU9i_CnoDSyDFbTGA", "").strip()
-ADMIN_ID = int(os.getenv("8218627841", "0") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
 DB_NAME = os.getenv("DB_NAME", "bfix_store.db")
 WHATSAPP_LINK = os.getenv("WHATSAPP_LINK", "https://t.me/bfixSoftware")
 SUPPORT_LINK = os.getenv("SUPPORT_LINK", "https://t.me/bfixSoftware")
@@ -32,7 +32,8 @@ PAYMENT_DETAILS = os.getenv(
     "PAYMENT_DETAILS",
     "تواصل مع الدعم للحصول على بيانات الدفع المحدثة، ثم أرسل إشعار التحويل مع الاسم والمبلغ ووسيلة الدفع.",
 )
-ENABLE_HEALTHCHECK = os.getenv("ENABLE_HEALTHCHECK", "false").lower() == "true"
+# خدمة Render من نوع Web Service تحتاج منفذ HTTP مفتوحاً؛ مفعّل افتراضياً.
+ENABLE_HEALTHCHECK = os.getenv("ENABLE_HEALTHCHECK", "true").lower() == "true"
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -855,4 +856,523 @@ async def admin_menu_handler(update, context):
             return
         buttons = [[styled_button(f"#{row['id']} | {str(row['text'])[:28]}",callback_data=f"bcast_{row['id']}",style="primary")] for row in broadcasts]
         buttons.append([styled_button("رجوع",callback_data="adm_main",style="danger")])
-    
+        await query.message.edit_text("<b>الإشعارات السابقة</b>\nاختر إشعاراً لحذفه من رسائل العملاء.",reply_markup=InlineKeyboardMarkup(buttons),parse_mode=ParseMode.HTML)
+    elif data.startswith("bcast_"):
+        broadcast_id = data.removeprefix("bcast_")
+        row = db_one("SELECT id,text,created_at FROM broadcasts WHERE id=?",(int(broadcast_id),)) if broadcast_id.isdigit() else None
+        if not row:
+            await query.answer("الإشعار غير موجود.",show_alert=True)
+            return
+        await query.message.edit_text(f"<b>الإشعار #{row['id']}</b>\n\n{esc(row['text'])}\n\nأُرسل: {esc(row['created_at'])}",reply_markup=InlineKeyboardMarkup([[styled_button("حذف الإشعار من العملاء",callback_data=f"bdel_{row['id']}",style="danger")],[styled_button("رجوع",callback_data="adm_broadcasts",style="primary")]]),parse_mode=ParseMode.HTML)
+    elif data.startswith("bdel_"):
+        broadcast_id = data.removeprefix("bdel_")
+        if broadcast_id.isdigit():
+            context.user_data["delete_broadcast_id"] = int(broadcast_id)
+            await query.message.edit_text("هل تريد حذف هذا الإشعار من رسائل العملاء؟",reply_markup=InlineKeyboardMarkup([[styled_button("نعم، احذف",callback_data=f"bconfirm_{broadcast_id}",style="danger")],[styled_button("إلغاء",callback_data="adm_broadcasts",style="primary")]]))
+    elif data.startswith("bconfirm_"):
+        broadcast_id = data.removeprefix("bconfirm_")
+        if broadcast_id.isdigit():
+            await delete_broadcast_messages(context.bot, int(broadcast_id))
+            await query.message.edit_text("انتهت محاولة حذف الإشعار. راجع سجل الإشعار لمعرفة النتيجة.",reply_markup=InlineKeyboardMarkup([[styled_button("إدارة الإشعارات",callback_data="adm_broadcasts",style="primary")]]))
+
+
+async def admin_conv_start(update, context):
+    query = update.callback_query
+    if not query or not query.message or not is_admin(query.from_user.id):
+        return ConversationHandler.END
+    await query.answer()
+    data = query.data or ""
+    context.user_data.clear()
+    if data in {"adm_add_bal","adm_sub_bal"}:
+        context.user_data["action"] = data
+        await query.message.edit_text("أرسل معرف المستخدم الرقمي، أو /cancel للإلغاء.")
+        return ADMIN_USER_ID
+    if data == "adm_search":
+        await query.message.edit_text("أرسل معرف المستخدم الرقمي، أو /cancel للإلغاء.")
+        return ADMIN_SEARCH
+    if data == "adm_broadcast":
+        await query.message.edit_text("أرسل نص الإشعار الجماعي، أو /cancel للإلغاء.")
+        return ADMIN_BROADCAST_TEXT
+    if data == "maint_edit":
+        await query.message.edit_text("أرسل رسالة الصيانة التي تظهر للعملاء، أو /cancel للإلغاء.")
+        return ADMIN_MAINTENANCE_MESSAGE
+    if data == "adm_add_srv":
+        await query.message.edit_text("اختر القسم:",reply_markup=InlineKeyboardMarkup([[styled_button("الخدمات الرقمية",callback_data="cat_digital",style="success")],[styled_button("الاشتراكات",callback_data="cat_subscriptions",style="success")],[styled_button("العروض المجانية",callback_data="cat_free_offers",style="primary")],[styled_button("عروض VIP",callback_data="cat_vip",style="primary")],[styled_button("إيجار الأدوات",callback_data="cat_rentals",style="success")],[styled_button("إلغاء",callback_data="cat_cancel",style="danger")]]))
+        return ADMIN_SRV_CATEGORY
+    if data == "adm_new_card":
+        await query.message.edit_text("أرسل كود البطاقة، أو /cancel للإلغاء.")
+        return ADMIN_CARD_CODE
+    for prefix, field, prompt in (("editname_","name","أرسل الاسم الجديد، أو /cancel."),("editdesc_","description","أرسل الوصف الجديد، أو /cancel."),("editprice_","price","أرسل السعر الجديد، أو /cancel."),("editduration_","duration","أرسل المدة الجديدة، أو /cancel.")):
+        if data.startswith(prefix) and data.removeprefix(prefix).isdigit():
+            service_id = int(data.removeprefix(prefix))
+            if not get_service(service_id, active=False):
+                await query.message.edit_text("الخدمة غير متاحة.")
+                return ConversationHandler.END
+            context.user_data["edit_service_id"] = service_id
+            context.user_data["edit_field"] = field
+            await query.message.edit_text(prompt)
+            return ADMIN_EDIT_VALUE
+    if data.startswith("manualsetup_") and data.removeprefix("manualsetup_").isdigit():
+        service_id = int(data.removeprefix("manualsetup_"))
+        if not get_service(service_id, active=False):
+            await query.message.edit_text("الخدمة غير متاحة.")
+            return ConversationHandler.END
+        context.user_data["manual_setup_service_id"] = service_id
+        await query.message.edit_text("أرسل سؤال العميل المطلوب قبل تنفيذ الخدمة، مثال: أرسل رقم الهاتف مع رمز الدولة.")
+        return ADMIN_MANUAL_QUESTION
+    if data.startswith("ordmsg_") and data.removeprefix("ordmsg_").isdigit():
+        manual_id = int(data.removeprefix("ordmsg_"))
+        if not get_manual_order(manual_id):
+            await query.message.edit_text("الطلب غير موجود.")
+            return ConversationHandler.END
+        context.user_data["admin_order_id"] = manual_id
+        await query.message.edit_text("اكتب رسالة التحديث التي ستصل للعميل، أو /cancel للإلغاء.")
+        return ADMIN_ORDER_MESSAGE
+    if data.startswith("addstock_") and data.removeprefix("addstock_").isdigit():
+        service_id = int(data.removeprefix("addstock_"))
+        if not get_service(service_id, active=False):
+            await query.message.edit_text("الخدمة غير متاحة.")
+            return ConversationHandler.END
+        context.user_data["stock_id"] = service_id
+        await query.message.edit_text(f"أرسل عدد الأكواد/الحسابات التي تريد إضافتها (من 1 إلى {MAX_STOCK_QUANTITY})، أو /cancel.")
+        return ADMIN_STOCK_QUANTITY
+    return ConversationHandler.END
+
+
+async def admin_category(update, context):
+    query = update.callback_query
+    if not query or not query.message:
+        return ConversationHandler.END
+    await query.answer()
+    if query.data == "cat_cancel":
+        context.user_data.clear()
+        await query.message.edit_text("تم الإلغاء.")
+        return ConversationHandler.END
+    category = (query.data or "").removeprefix("cat_")
+    if category not in {"digital","subscriptions","free_offers","vip","rentals"}:
+        return ConversationHandler.END
+    context.user_data["category"] = category
+    await query.message.edit_text("أرسل اسم الخدمة، أو /cancel للإلغاء.")
+    return ADMIN_SRV_NAME
+
+
+async def admin_user_id(update, context):
+    text = update.message.text.strip()
+    if not text.isdigit() or not db_one("SELECT 1 FROM users WHERE user_id=?",(int(text),)):
+        await update.message.reply_text("المستخدم غير موجود. أرسل معرفاً صحيحاً أو /cancel.")
+        return ADMIN_USER_ID
+    context.user_data["target"] = int(text)
+    await update.message.reply_text("أرسل مبلغاً موجباً.")
+    return ADMIN_AMOUNT
+
+
+async def admin_amount(update, context):
+    cents = parse_cents(update.message.text)
+    target, action = context.user_data.get("target"), context.user_data.get("action")
+    if cents is None or not isinstance(target,int):
+        await update.message.reply_text("أرسل مبلغاً موجباً صالحاً أو /cancel.")
+        return ADMIN_AMOUNT
+    ok, result = adjust_balance(target, cents if action == "adm_add_bal" else -cents, "admin_credit" if action == "adm_add_bal" else "admin_debit")
+    context.user_data.clear()
+    await update.message.reply_text(f"تم التحديث. الرصيد الجديد: {result}$" if ok else f"لم يتم التعديل: {result}")
+    return ConversationHandler.END
+
+
+async def admin_search(update, context):
+    text = update.message.text.strip()
+    user = db_one("SELECT name,balance_cents,join_date FROM users WHERE user_id=?",(int(text),)) if text.isdigit() else None
+    await update.message.reply_text(f"الاسم: {user['name']}\nالرصيد: {cents_text(user['balance_cents'])}$\nالانضمام: {user['join_date']}" if user else "المستخدم غير موجود.")
+    return ConversationHandler.END
+
+
+async def admin_broadcast(update, context):
+    text = clean(update.message.text, MAX_BROADCAST_LENGTH)
+    if not text:
+        await update.message.reply_text("الإشعار فارغ أو طويل جداً. أعد الإرسال أو /cancel.")
+        return ADMIN_BROADCAST_TEXT
+    with db_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        broadcast = conn.execute("INSERT INTO broadcasts (text,status,created_at) VALUES (?, 'sending', ?)", (text, now_text()))
+        conn.commit()
+    broadcast_id = broadcast.lastrowid
+    users = db_all("SELECT user_id FROM users")
+    await update.message.reply_text(f"بدأ إرسال الإشعار رقم {broadcast_id} إلى {len(users)} مستخدماً.")
+    sent = blocked = failed = 0
+    for row in users:
+        user_id = row["user_id"]
+        try:
+            message = await context.bot.send_message(user_id, f"📢 إشعار من المتجر:\n\n{text}")
+            with db_connect() as conn:
+                conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,message_id,status) VALUES (?,?,?,'sent')", (broadcast_id,user_id,message.message_id))
+            sent += 1
+            await asyncio.sleep(0.05)
+        except RetryAfter as err:
+            wait_for = err.retry_after.total_seconds() if hasattr(err.retry_after, "total_seconds") else float(err.retry_after)
+            await asyncio.sleep(wait_for + 1)
+            try:
+                message = await context.bot.send_message(user_id, f"📢 إشعار من المتجر:\n\n{text}")
+                with db_connect() as conn:
+                    conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,message_id,status) VALUES (?,?,?,'sent')", (broadcast_id,user_id,message.message_id))
+                sent += 1
+            except TelegramError:
+                with db_connect() as conn:
+                    conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,status) VALUES (?,?,'failed')", (broadcast_id,user_id))
+                failed += 1
+        except Forbidden:
+            with db_connect() as conn:
+                conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,status) VALUES (?,?,'blocked')", (broadcast_id,user_id))
+            blocked += 1
+        except TelegramError:
+            with db_connect() as conn:
+                conn.execute("INSERT OR REPLACE INTO broadcast_deliveries (broadcast_id,user_id,status) VALUES (?,?,'failed')", (broadcast_id,user_id))
+            failed += 1
+    db_exec("UPDATE broadcasts SET status='sent' WHERE id=?", (broadcast_id,))
+    await update.message.reply_text(f"اكتمل الإرسال. رقم الإشعار: {broadcast_id} | نجح: {sent} | حظر البوت: {blocked} | فشل: {failed}. يمكنك حذفه من لوحة إدارة الإشعارات.")
+    return ConversationHandler.END
+
+
+async def delete_broadcast_messages(bot, broadcast_id):
+    deliveries = db_all("""SELECT user_id,message_id FROM broadcast_deliveries
+        WHERE broadcast_id=? AND status='sent' AND message_id IS NOT NULL""", (broadcast_id,))
+    deleted = failed = 0
+    for row in deliveries:
+        try:
+            await bot.delete_message(chat_id=row["user_id"], message_id=row["message_id"])
+            db_exec("UPDATE broadcast_deliveries SET status='deleted',deleted_at=? WHERE broadcast_id=? AND user_id=?", (now_text(),broadcast_id,row["user_id"]))
+            deleted += 1
+            await asyncio.sleep(0.05)
+        except TelegramError:
+            db_exec("UPDATE broadcast_deliveries SET status='delete_failed' WHERE broadcast_id=? AND user_id=?", (broadcast_id,row["user_id"]))
+            failed += 1
+    db_exec("UPDATE broadcasts SET status='deleted',deleted_at=? WHERE id=?", (now_text(),broadcast_id))
+    logger.info("حذف الإشعار %s: نجح=%s فشل=%s", broadcast_id, deleted, failed)
+    return deleted, failed
+
+
+async def admin_maintenance_message(update, context):
+    text = clean(update.message.text, MAX_BROADCAST_LENGTH)
+    if not text:
+        await update.message.reply_text("الرسالة فارغة أو طويلة جداً. أعد الإرسال أو /cancel.")
+        return ADMIN_MAINTENANCE_MESSAGE
+    set_setting("maintenance_message", text)
+    context.user_data.clear()
+    await update.message.reply_text("تم حفظ رسالة الصيانة بنجاح.")
+    return ConversationHandler.END
+
+
+async def admin_edit_value(update, context):
+    service_id = context.user_data.get("edit_service_id")
+    field = context.user_data.get("edit_field")
+    service = get_service(service_id, active=False) if isinstance(service_id, int) else None
+    if not service or field not in {"name", "description", "price", "duration"}:
+        context.user_data.clear()
+        await update.message.reply_text("انتهت بيانات التعديل. ابدأ من لوحة الخدمة مجدداً.")
+        return ConversationHandler.END
+    if field == "name":
+        value = clean(update.message.text, MAX_NAME)
+        column, params = "name", (value, service_id)
+    elif field == "description":
+        value = clean(update.message.text, MAX_DESCRIPTION)
+        column, params = "description", (value, service_id)
+    elif field == "duration":
+        value = clean(update.message.text, MAX_NAME)
+        column, params = "duration", (value, service_id)
+    else:
+        value = parse_cents(update.message.text)
+        if service["category"] == "free_offers":
+            await update.message.reply_text("العرض المجاني يجب أن يبقى بسعر 0. غيّر قسم الخدمة أولاً إن أردت وضع سعر.")
+            return ADMIN_EDIT_VALUE
+        if value is None:
+            await update.message.reply_text("أرسل سعراً موجباً صالحاً أو /cancel.")
+            return ADMIN_EDIT_VALUE
+        db_exec("UPDATE services SET price=?,price_cents=? WHERE id=?", (value/100,value,service_id))
+        context.user_data.clear()
+        await update.message.reply_text("تم تعديل سعر الخدمة.")
+        return ConversationHandler.END
+    if not value:
+        await update.message.reply_text("القيمة غير صالحة. أعد الإرسال أو /cancel.")
+        return ADMIN_EDIT_VALUE
+    db_exec(f"UPDATE services SET {column}=? WHERE id=?", params)
+    context.user_data.clear()
+    await update.message.reply_text("تم تعديل الخدمة بنجاح.")
+    return ConversationHandler.END
+
+
+async def admin_manual_question(update, context):
+    value = clean(update.message.text, MAX_DESCRIPTION)
+    if not value:
+        await update.message.reply_text("السؤال غير صالح. أعد الإرسال أو /cancel.")
+        return ADMIN_MANUAL_QUESTION
+    context.user_data["manual_question"] = value
+    await update.message.reply_text("اكتب رسالة الانتظار التي تصل للعميل بعد إرسال بياناته.")
+    return ADMIN_MANUAL_WAIT
+
+
+async def admin_manual_wait(update, context):
+    value = clean(update.message.text, MAX_DESCRIPTION)
+    if not value:
+        await update.message.reply_text("الرسالة غير صالحة. أعد الإرسال أو /cancel.")
+        return ADMIN_MANUAL_WAIT
+    context.user_data["manual_wait"] = value
+    await update.message.reply_text("اكتب رسالة الإكمال التي تصل للعميل بعد تنفيذ الخدمة.")
+    return ADMIN_MANUAL_COMPLETE
+
+
+async def admin_manual_complete(update, context):
+    completion = clean(update.message.text, MAX_DESCRIPTION)
+    service_id = context.user_data.get("manual_setup_service_id")
+    question = context.user_data.get("manual_question")
+    wait_message = context.user_data.get("manual_wait")
+    if not completion or not isinstance(service_id, int) or not question or not wait_message:
+        await update.message.reply_text("بيانات غير صالحة. أعد الإرسال أو /cancel.")
+        return ADMIN_MANUAL_COMPLETE
+    db_exec("""UPDATE services SET execution_mode='manual',request_prompt=?,wait_message=?,completion_prompt=?
+        WHERE id=?""", (question,wait_message,completion,service_id))
+    context.user_data.clear()
+    await update.message.reply_text("تم إعداد الخدمة كطلب يدوي بنجاح.")
+    return ConversationHandler.END
+
+
+async def admin_order_message(update, context):
+    message = clean(update.message.text, MAX_ORDER_MESSAGE_LENGTH)
+    manual_id = context.user_data.get("admin_order_id")
+    order = get_manual_order(manual_id) if isinstance(manual_id, int) else None
+    if not message or not order:
+        await update.message.reply_text("الرسالة أو الطلب غير صالح. أعد الإرسال أو /cancel.")
+        return ADMIN_ORDER_MESSAGE
+    if not update_manual_order(manual_id, "قيد التنفيذ", message):
+        await update.message.reply_text("تعذر حفظ تحديث الطلب.")
+        return ConversationHandler.END
+    try:
+        await context.bot.send_message(order["user_id"], f"<b>تحديث بخصوص طلبك #{order['order_id']}</b>\n\n{esc(message)}", parse_mode=ParseMode.HTML)
+        result = "تم إرسال التحديث للعميل."
+    except TelegramError:
+        logger.exception("تعذر إرسال تحديث الطلب للعميل")
+        result = "تم حفظ التحديث، لكن تعذر إرساله للعميل حالياً."
+    context.user_data.clear()
+    await update.message.reply_text(result)
+    return ConversationHandler.END
+
+
+async def admin_card_code(update, context):
+    code = clean(update.message.text, MAX_CODE)
+    if not code or db_one("SELECT 1 FROM cards WHERE code=?",(code,)):
+        await update.message.reply_text("الكود غير صالح أو موجود مسبقاً. أرسل آخر أو /cancel.")
+        return ADMIN_CARD_CODE
+    context.user_data["card_code"] = code
+    await update.message.reply_text("أرسل قيمة البطاقة كمبلغ موجب.")
+    return ADMIN_CARD_AMOUNT
+
+
+async def admin_card_amount(update, context):
+    cents = parse_cents(update.message.text)
+    code = context.user_data.get("card_code")
+    if cents is None or not code:
+        await update.message.reply_text("أرسل قيمة موجبة صحيحة أو /cancel.")
+        return ADMIN_CARD_AMOUNT
+    try:
+        db_exec("INSERT INTO cards (code,amount,amount_cents) VALUES (?,?,?)",(code,cents/100,cents))
+        await update.message.reply_text(f"تم إنشاء البطاقة {code} بقيمة {cents_text(cents)}$.")
+    except sqlite3.IntegrityError:
+        await update.message.reply_text("الكود موجود مسبقاً.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def admin_service_name(update, context):
+    value = clean(update.message.text, MAX_NAME)
+    if not value:
+        await update.message.reply_text("اسم غير صالح. أعد الإرسال.")
+        return ADMIN_SRV_NAME
+    context.user_data["name"] = value
+    await update.message.reply_text("أرسل وصفاً مختصراً للخدمة.")
+    return ADMIN_SRV_DESC
+
+
+async def admin_service_desc(update, context):
+    value = clean(update.message.text, MAX_DESCRIPTION)
+    if not value:
+        await update.message.reply_text("وصف غير صالح. أعد الإرسال.")
+        return ADMIN_SRV_DESC
+    context.user_data["description"] = value
+    if context.user_data.get("category") == "free_offers":
+        context.user_data["price"] = 0
+        await update.message.reply_text("هذا قسم العروض المجانية، لذا سيكون السعر 0. أرسل مدة العرض، مثل: تسليم فوري أو يوم واحد.")
+        return ADMIN_SRV_DURATION
+    await update.message.reply_text("أرسل السعر كمبلغ موجب.")
+    return ADMIN_SRV_PRICE
+
+
+async def admin_service_price(update, context):
+    cents = parse_cents(update.message.text)
+    if cents is None:
+        await update.message.reply_text("السعر يجب أن يكون مبلغاً موجباً. أعد الإرسال.")
+        return ADMIN_SRV_PRICE
+    context.user_data["price"] = cents
+    await update.message.reply_text("أرسل مدة الخدمة، مثل: تسليم فوري أو شهر.")
+    return ADMIN_SRV_DURATION
+
+
+async def admin_service_duration(update, context):
+    duration = clean(update.message.text, MAX_NAME)
+    needed = ("name","description","price","category")
+    if not duration or any(key not in context.user_data for key in needed):
+        context.user_data.clear()
+        await update.message.reply_text("انتهت بيانات العملية. ابدأ من جديد.")
+        return ConversationHandler.END
+    price = context.user_data["price"]
+    db_exec("""INSERT INTO services
+        (name,description,price,price_cents,duration,category,is_active,execution_mode,request_prompt,wait_message,completion_prompt)
+        VALUES (?,?,?,?,?,?,1,'auto','','تم استلام طلبك، يرجى الانتظار.','تم تنفيذ طلبك بنجاح.')""",
+        (context.user_data["name"],context.user_data["description"],price/100,price,duration,context.user_data["category"]))
+    context.user_data.clear()
+    await update.message.reply_text("تمت إضافة الخدمة. أضف الأكواد قبل عرضها للبيع.")
+    return ConversationHandler.END
+
+
+async def admin_price_edit(update, context):
+    cents = parse_cents(update.message.text)
+    service_id = context.user_data.get("edit_id")
+    if cents is None or not isinstance(service_id,int):
+        await update.message.reply_text("أرسل سعراً موجباً صالحاً أو /cancel.")
+        return ADMIN_NEW_PRICE
+    db_exec("UPDATE services SET price=?,price_cents=? WHERE id=? AND is_active=1",(cents/100,cents,service_id))
+    context.user_data.clear()
+    await update.message.reply_text("تم تعديل السعر.")
+    return ConversationHandler.END
+
+
+async def admin_stock_quantity(update, context):
+    text = update.message.text.strip() if update.message else ""
+    if not text.isdigit() or not 1 <= int(text) <= MAX_STOCK_QUANTITY:
+        await update.message.reply_text(f"أرسل رقماً صحيحاً من 1 إلى {MAX_STOCK_QUANTITY}، أو /cancel.")
+        return ADMIN_STOCK_QUANTITY
+    context.user_data["stock_quantity"] = int(text)
+    await update.message.reply_text(
+        f"أرسل الآن {int(text)} كود/حساب بالضبط. افصل بين كل كود وآخر بعلامة ===، أو /cancel للإلغاء."
+    )
+    return ADMIN_STOCK_KEY
+
+
+async def admin_stock(update, context):
+    text = clean(update.message.text, MAX_STOCK_TEXT)
+    service_id = context.user_data.get("stock_id")
+    expected_quantity = context.user_data.get("stock_quantity")
+    if not text or not isinstance(service_id,int) or not isinstance(expected_quantity,int) or not get_service(service_id):
+        await update.message.reply_text("بيانات غير صالحة. أعد الإرسال أو /cancel.")
+        return ADMIN_STOCK_KEY
+    keys = [item.strip() for item in text.split("===") if item.strip()]
+    if len(keys) != expected_quantity:
+        await update.message.reply_text(f"أدخلت {len(keys)} كوداً، بينما اخترت {expected_quantity}. أرسل العدد المحدد تماماً مفصولاً بعلامة ===.")
+        return ADMIN_STOCK_KEY
+    with db_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executemany("INSERT INTO product_keys (service_id,key_text,is_sold) VALUES (?,?,0)",[(service_id,key) for key in keys])
+        conn.commit()
+    available_quantity = stock_count(service_id)
+    context.user_data.clear()
+    await update.message.reply_text(f"تمت إضافة {len(keys)} كود/حساب بنجاح. الكمية المتوفرة الآن: {available_quantity}.")
+    return ConversationHandler.END
+
+
+async def cancel(update, context):
+    context.user_data.clear()
+    if update.message:
+        await update.message.reply_text("تم الإلغاء.")
+    elif update.callback_query:
+        await update.callback_query.answer("تم الإلغاء")
+    return ConversationHandler.END
+
+
+# ========================= فحص الصحة والتشغيل =========================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path not in ("/", "/health"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = b'{"status":"ok"}'
+        self.send_response(200)
+        self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length",str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *_args):
+        return
+
+
+def health_server():
+    server = ThreadingHTTPServer(("0.0.0.0",int(os.getenv("PORT","8080"))),HealthHandler)
+    logger.info("خادم الصحة جاهز")
+    server.serve_forever()
+
+
+async def error_handler(update, context):
+    logger.exception("خطأ غير معالج",exc_info=context.error)
+    if isinstance(update,Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("حدث خطأ مؤقت. أعد المحاولة لاحقاً.")
+        except TelegramError:
+            pass
+
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN غير مضبوط. ضعه في متغيرات البيئة قبل التشغيل.")
+    if ADMIN_ID <= 0:
+        raise RuntimeError("ADMIN_ID غير مضبوط. ضعه في متغيرات البيئة قبل التشغيل.")
+    init_db()
+    if ENABLE_HEALTHCHECK:
+        threading.Thread(target=health_server,daemon=True).start()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .connect_timeout(20)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conv_start, pattern=r"^(adm_add_bal|adm_sub_bal|adm_search|adm_broadcast|maint_edit|adm_add_srv|adm_new_card|edit(name|desc|price|duration)_\d+|addstock_\d+|manualsetup_\d+|ordmsg_\d+)$")],
+        states={
+            ADMIN_SRV_CATEGORY: [CallbackQueryHandler(admin_category, pattern=r"^cat_")],
+            ADMIN_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_user_id)],
+            ADMIN_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_amount)],
+            ADMIN_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_search)],
+            ADMIN_BROADCAST_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
+            ADMIN_MAINTENANCE_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_maintenance_message)],
+            ADMIN_CARD_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_card_code)],
+            ADMIN_CARD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_card_amount)],
+            ADMIN_SRV_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_service_name)],
+            ADMIN_SRV_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_service_desc)],
+            ADMIN_SRV_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_service_price)],
+            ADMIN_SRV_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_service_duration)],
+            ADMIN_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_value)],
+            ADMIN_MANUAL_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_question)],
+            ADMIN_MANUAL_WAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_wait)],
+            ADMIN_MANUAL_COMPLETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_complete)],
+            ADMIN_ORDER_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_order_message)],
+            ADMIN_STOCK_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_stock_quantity)],
+            ADMIN_STOCK_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_stock)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+        name="admin_conversation",
+    ))
+    app.add_handler(CallbackQueryHandler(
+        admin_menu_handler,
+        pattern=r"^(adm_(main|stats|maintenance|srv_menu|service_list|stock_list|restore_list|orders|broadcasts)|maint_(on|off)|srvmanage_\d+|edit(cat|mode)_\d+|set(cat|mode)_\d+_.+|archive_\d+|restore_\d+|manualord_\d+|orddone_\d+|bcast_\d+|bdel_\d+|bconfirm_\d+)$",
+    ))
+    app.add_handler(CallbackQueryHandler(main_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_error_handler(error_handler)
+    logger.info("البوت جاهز للتشغيل")
+    app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
