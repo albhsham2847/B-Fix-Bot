@@ -42,8 +42,8 @@ def run_health_server():
 threading.Thread(target=run_health_server, daemon=True).start()
 
 # ================= (1) الإعدادات =================
-BOT_TOKEN = "ضع_التوكن_الخاص_بك_هنا"  # ⬅️ ضع التوكن هنا
-ADMIN_ID = 00000000  # ⬅️ ضع الآيدي الخاص بك كرقْم (Integer)
+BOT_TOKEN = "8299192931:AAHkXI_BLyoAp8TvrSCU9i_CnoDSyDFbTGA"  # ⬅️ ضع التوكن هنا
+ADMIN_ID = 8218627841  # ⬅️ ضع الآيدي الخاص بك كرقْم (Integer)
 
 WHATSAPP_LINK = "https://iwtsp.com/967777728478"
 SUPPORT_LINK = "https://t.me/bfixSoftware"
