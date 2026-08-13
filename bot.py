@@ -1,5 +1,5 @@
 # ==============================================================================
-# |   B-Fix Smart Bot - النسخة المحدثة النهائية (قسم شحن الأدوات والبوكسات)    |
+# |   B-Fix Smart Bot - النسخة النهائية المحدثة (مع وصف فخم واشتراك إجباري)    |
 # ==============================================================================
 
 import os
@@ -43,6 +43,9 @@ ADMIN_ID = 8218627841  # ⬅️ ضع الآيدي الخاص بك كرقْم
 
 WHATSAPP_LINK = "https://iwtsp.com/967777728478"
 SUPPORT_LINK = "https://t.me/bfixSoftware"
+CHANNEL_USERNAME = "@bfixSoftware"  # ⬅️ ضع يوزر قناتك هنا (مثال: @YourChannel)
+CHANNEL_LINK = "https://t.me/bfixSoftware" # ⬅️ رابط القناة
+
 DB_NAME = "bfix_store.db"
 
 COLOR_PRIMARY = "🔵"
@@ -52,10 +55,12 @@ COLOR_WARNING = "⚠️"
 COLOR_INFO = "ℹ️"
 COLOR_ACTION = "✨"
 
+# حالات المحادثة الإدارية
 (ADMIN_USER_ID, ADMIN_AMOUNT, ADMIN_SEARCH, ADMIN_BROADCAST, ADMIN_SRV_CATEGORY,
  ADMIN_SRV_NAME, ADMIN_SRV_DESC, ADMIN_SRV_PRICE, ADMIN_SRV_DURATION, 
  ADMIN_NEW_PRICE, ADMIN_CARD_CODE, ADMIN_CARD_AMOUNT, ADMIN_STOCK_KEY,
- ADMIN_MAINTENANCE_TEXT, WAITING_USER_EMAIL, WAITING_RENTAL_CREDENTIALS) = range(16)
+ ADMIN_MAINTENANCE_TEXT, WAITING_USER_EMAIL, WAITING_RENTAL_CREDENTIALS,
+ ADMIN_MSG_TARGET_ID, ADMIN_MSG_CONTENT) = range(18)
 
 # ================= (2) قاعدة البيانات =================
 def db_execute(query, params=()):
@@ -115,17 +120,61 @@ async def check_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return False
     return True
 
+# ================= (2.5) التحقق من الاشتراك الإجباري =================
+async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE):
+    # المشرف مستثنى دائماً من الاشتراك الإجباري
+    if user_id == ADMIN_ID:
+        return True
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        if member.status in ['member', 'creator', 'administrator']:
+            return True
+    except Exception:
+        pass
+    return False
+
+async def enforce_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if await check_subscription(user.id, context):
+        return True
+    
+    warning_text = (
+        "⚠️ **عذراً عزيزي العميل!**\n\n"
+        "🔒 لكي تتمكن من استخدام متجر **B-Fix Software** والاستفادة من الخدمات والأقسام، يجب عليك أولاً الاشتراك في قناة البوت الرسمية.\n\n"
+        "👇 اضغط على الزر أدناه للانضمام للقناة، ثم اضغط على زر **(تحقق من الاشتراك ✅)**."
+    )
+    keyboard = [
+        [InlineKeyboardButton("📢 اشترك في القناة الرسمية 🔔", url=CHANNEL_LINK)],
+        [InlineKeyboardButton("✅ تحقق من الاشتراك 🔄", callback_data="check_sub")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.message:
+        await update.message.reply_text(warning_text, reply_markup=markup, parse_mode='Markdown')
+    elif update.callback_query:
+        try:
+            await update.callback_query.message.edit_text(warning_text, reply_markup=markup, parse_mode='Markdown')
+        except:
+            await update.callback_query.answer("⚠️ يرجى الاشتراك في القناة أولاً!", show_alert=True)
+    return False
+
 # ================= (3) واجهة العميل والأقسام =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_maintenance(update, context): return
     user = update.effective_user
+    
+    # 1. فحص الصيانة أولاً
+    if not await check_maintenance(update, context, is_admin=(user.id == ADMIN_ID)): return
+    
+    # 2. فحص الاشتراك الإجباري
+    if not await enforce_subscription(update, context): return
+    
     add_user_if_not_exists(user.id, user.first_name)
     
     text = (
         "✨ ━━━━━ ❲ 𝐁-𝐅𝐢𝐱 𝐒𝐨𝐟𝐭𝐰𝐚𝐫𝐞 ❳ ━━━━━ ✨\n\n"
         f"👋 أهلاً بك يا [{user.first_name}](tg://user?id={user.id})\n"
-        "في متجرك الآلي للخدمات والاشتراكات الرقمية 🚀\n\n"
-        "🛒 ❲ اختر القسم المطلوب ❳ 👇\n"
+        "في متجرك الآلي المتطور لشحن الأدوات والبوكسات والاشتراكات الرقمية 🚀\n\n"
+        "🛒 ❲ اختر القسم المطلوب من القائمة أدناه ❳ 👇\n"
         "━━━━━━━━━━━━━━━━━━━━━"
     )
     keyboard = [
@@ -147,11 +196,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.callback_query: await update.callback_query.message.edit_text(text, reply_markup=markup, parse_mode='Markdown')
 
 async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_maintenance(update, context): return
+    user_id = update.effective_user.id
     query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
     data = query.data
+
+    # معالجة زر التحقق من الاشتراك
+    if data == "check_sub":
+        if await check_subscription(user_id, context):
+            await query.answer("✅ تم التحقق بنجاح! أهلاً بك في المتجر.", show_alert=True)
+            await start_command(update, context)
+        else:
+            await query.answer("❌ لم تقم بالاشتراك في القناة بعد! يرجى الاشتراك أولاً.", show_alert=True)
+        return
+
+    if not await check_maintenance(update, context, is_admin=(user_id == ADMIN_ID)): return
+    if not await enforce_subscription(update, context): return
+    
+    await query.answer()
 
     if data == "my_profile":
         user_info = db_fetch_one("SELECT name, balance FROM users WHERE user_id = ?", (user_id,))
@@ -187,7 +248,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "`580300`\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "⚡ **تعليمات التحويل وإتمام الطلب:**\n"
-            "1️⃣ قم بالتحويل إلى الرقم الموضح أعلاه بالمبلغ المطلوبة.\n"
+            "1️⃣ قم بالتحويل إلى الرقم الموضح أعلاه بالمبلغ المطلوب.\n"
             "2️⃣ خذ لقطة شاشة (إشعار) التحويل.\n"
             "3️⃣ تواصل معنا عبر زر الدعم أو واتساب وأرسل الإشعار مع اسمك لتتم تعبئة رصيدك فوراً.\n\n"
             "🔒 **معاملة آمنة ومحمية بالكامل**"
@@ -352,7 +413,20 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع للقائمة", callback_data="main_menu")]]), parse_mode='Markdown')
 
     elif data == "bot_info":
-        await query.message.edit_text("🤖 متجر B-Fix الذكي لشحن الأدوات والبوكسات والاشتراكات الرقمية.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع", callback_data="main_menu")]]))
+        info_msg = (
+            "🌟 **━━━━━ ❲ 𝐁-𝐅𝐢𝐱 𝐒𝐨𝐟𝐭𝐰𝐚𝐫𝐞 ❳ ━━━━━** 🌟\n\n"
+            "🤖 **نظام إدارة متجرك الآلي المتطور للخدمات الرقمية وصيانة الهواتف الذكية.**\n\n"
+            "✨ **مميزاتنا الحصرية:**\n"
+            "⚡ شحن فوري وآمن لكافة الأدوات والبوكسات العالمية.\n"
+            "🔧 خدمات إيجار الأدوات الاحترافية مع دعم فني مستمر.\n"
+            "💎 اشتراكات VIP وعروض مجانية حصرية ومتجددة باستمرار.\n"
+            "💳 بوابات دفع متعددة وآمنة وموثوقة 100%.\n\n"
+            "🌐 **روابط التواصل الرسمية:**\n"
+            "• قناة البوت الرسمية: [انقر للانضمام](https://t.me/bfixSoftware)\n"
+            "• خدمة العملاء عبر واتساب: [تواصل معنا](https://iwtsp.com/967777728478)\n\n"
+            "🔒 **نعمل على خدمتكم على مدار الساعة 24/7 بكل احترافية وموثوقية.**"
+        )
+        await query.message.edit_text(info_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown', disable_web_page_preview=True)
 
     elif data == "main_menu":
         await start_command(update, context)
@@ -360,6 +434,37 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
+    if user.id == ADMIN_ID and context.user_data.get('waiting_msg_id'):
+        if not update.message.text.isdigit():
+            await update.message.reply_text("❌ الآيدي يجب أن يكون أرقاماً فقط. أعد الإرسال أو /cancel")
+            return
+        context.user_data['target_user_id'] = int(update.message.text)
+        context.user_data['waiting_msg_id'] = False
+        context.user_data['waiting_msg_content'] = True
+        await update.message.reply_text("✍️ ممتاز. أرسل الآن نص الرسالة أو بيانات التفعيل (يوزر وباسورد) التي تريد إرسالها لهذا العميل:")
+        return
+
+    if user.id == ADMIN_ID and context.user_data.get('waiting_msg_content'):
+        target_id = context.user_data.get('target_user_id')
+        msg_text = update.message.text
+        context.user_data.clear()
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"🔔 **إشعار من الإدارة:**\n\n{msg_text}",
+                parse_mode='Markdown'
+            )
+            await update.message.reply_text(f"✅ تم إرسال الرسالة بنجاح إلى العميل بالآيدي: `{target_id}`", parse_mode='Markdown')
+        except Exception as e:
+            await update.message.reply_text(f"❌ فشل إرسال الرسالة للعميل:\n`{e}`", parse_mode='Markdown')
+        return
+
+    # فحص الصيانة والاشتراك الإجباري للرسائل العادية
+    if user.id != ADMIN_ID:
+        if not await check_maintenance(update, context): return
+        if not await enforce_subscription(update, context): return
+
     if context.user_data.get('waiting_email_input'):
         email = update.message.text.strip()
         srv_id = context.user_data.get('pending_srv_id')
@@ -428,13 +533,11 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🆔 الآيدي: `{user.id}`\n"
             f"🛠️ الأداة: {srv_name}\n"
             f"📝 ملاحظة العميل: {note}\n\n"
-            "👇 أرسل يوزر وباسورد الإيجار لهذا العميل من خلال لوحة التحكم أو بالرد على رسالته."
+            f"💡 **لإرسال بيانات التفعيل لهذا العميل:**\n"
+            f"اذهب للوحة التحكم واضغط على زر (💬 مراسلة عميل عبر الآيدي) واستخدم الآيدي: `{user.id}`"
         )
         await context.bot.send_message(chat_id=ADMIN_ID, text=admin_alert, parse_mode='Markdown')
         return
-
-    if user.id != ADMIN_ID:
-        if not await check_maintenance(update, context): return
         
     if context.user_data.get('waiting_card'):
         code = update.message.text.strip()
@@ -467,6 +570,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🟢 إضافة رصيد", callback_data="adm_add_bal"), InlineKeyboardButton("🔴 خصم رصيد", callback_data="adm_sub_bal")],
         [InlineKeyboardButton("🎟 كود شحن", callback_data="adm_new_card"), InlineKeyboardButton("🔎 بحث عن مستخدم", callback_data="adm_search")],
+        [InlineKeyboardButton("💬 مراسلة عميل عبر الآيدي ✉️", callback_data="adm_send_msg_id")],
         [InlineKeyboardButton("🛠️ إدارة الخدمات والأقسام والأكواد", callback_data="adm_srv_menu")],
         [InlineKeyboardButton("📢 إشعار جماعي", callback_data="adm_broadcast"), InlineKeyboardButton("🗑️ حذف آخر إشعار", callback_data="adm_del_broadcast")],
         [InlineKeyboardButton(f"⚙️ صيانة البوت: {m_status}", callback_data="adm_toggle_main")],
@@ -484,6 +588,10 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "adm_main":
         await admin_panel(update, context)
+    elif data == "adm_send_msg_id":
+        await query.message.edit_text("✍️ أرسل الآن **آيدي (ID) العميل** المراد مراسلته:\n(أرسل /cancel للإلغاء)", parse_mode='Markdown')
+        context.user_data['waiting_msg_id'] = True
+        return
     elif data == "adm_toggle_main":
         current = is_bot_under_maintenance()
         if current:
