@@ -191,7 +191,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛒 ❲ اختر القسم المطلوب من القائمة أدناه ❳ 👇\n"
         "━━━━━━━━━━━━━━━━━━━━━"
     )
-    # أزرار العميل النظيفة
     keyboard = [
         [InlineKeyboardButton(b_dig[0], callback_data=b_dig[1]), InlineKeyboardButton(b_sub[0], callback_data=b_sub[1])],
         [InlineKeyboardButton(b_ren[0], callback_data=b_ren[1])],
@@ -247,7 +246,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     
     await query.answer()
 
-    # --- الأقسام الرئيسية للعملاء ---
     if data == "my_profile":
         user_info = db_fetch_one("SELECT name, balance FROM users WHERE user_id = ?", (user_id,))
         bal = user_info[1] if user_info else 0.0
@@ -442,7 +440,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         info_msg = "🌟 **━━━━━ ❲ 𝐁-𝐅𝐢𝐱 𝐒𝐨𝐟𝐭𝐰𝐚𝐫𝐞 | 𝐀𝐈 𝐒𝐭𝐨𝐫𝐞 ❳ ━━━━━** 🌟\n\n🤖 نظام إدارة متجرك الآلي المتطور للخدمات الرقمية وشحن الأدوات."
         await query.message.edit_text(info_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
 
-    # --- وظائف أزرار لوحة تحكم المشرف (Admin) ---
+    # --- وظائف أزرار لوحة تحكم المشرف (Admin Actions) ---
     elif data == "admin_add_bal":
         if user_id != ADMIN_ID: return
         context.user_data['admin_action'] = 'add_balance'
@@ -494,7 +492,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 text += f"🆔 `{s[0]}` - **{s[1]}** ({s[3]}) | السعر: {s[2]}$\n"
         else:
             text += "لا توجد خدمات مضافة.\n"
-        text += "\nلإضافة خدمة جديدة عبر البايثون أو قاعدة البيانات، أو تواصل معي لإضافتها فوراً."
         await query.message.reply_text(text, parse_mode='Markdown')
 
     elif data == "admin_del_last":
@@ -513,7 +510,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         new_status = 0 if status == 1 else 1
         db_execute("UPDATE maintenance_mode SET is_active = ? WHERE id = 1", (new_status,))
         await query.answer(f"✅ تم تغيير وضع الصيانة بنجاح!", show_alert=True)
-        # تحديث رسالة اللوحة فوراً
         try:
             maint_label = "🟢 (مفعل)" if new_status == 1 else "🔴 (معطل)"
             admin_keyboard = [
@@ -555,7 +551,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "main_menu":
         await start_command(update, context)
 
-# ================= (6) معالج الرسائل النصية والإشعارات الإدارية والعمليات =================
+# ================= (6) معالج الرسائل النصية والإشعارات الإدارية =================
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip() if update.message.text else ""
@@ -564,14 +560,13 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         if not await check_maintenance(update, context): return
         if not await enforce_subscription(update, context): return
 
-    # --- معالجة مهام المشرف الإدارية (Admin Actions) ---
     if user.id == ADMIN_ID and context.user_data.get('admin_action'):
         action = context.user_data.get('admin_action')
 
         if action == 'add_balance':
             context.user_data['target_user_id'] = int(text)
             context.user_data['admin_action'] = 'add_balance_amount'
-            await query_msg = await update.message.reply_text("✍️ أرسل الآن **المبلغ المراد إضافته** لرصيد هذا العميل:")
+            await update.message.reply_text("✍️ أرسل الآن **المبلغ المراد إضافته** لرصيد هذا العميل:")
             return
 
         elif action == 'add_balance_amount':
@@ -646,7 +641,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.send_message(chat_id=target_id, text=f"📬 **رسالة من إدارة المتجر:**\n\n{text}")
                 await update.message.reply_text("✅ تم إرسال الرسالة للعميل بنجاح!")
             except Exception as e:
-                await update.message.reply_text(f"❌فشل الإرسال: {e}")
+                await update.message.reply_text(f"❌ فشل الإرسال: {e}")
             return
 
         elif action == 'add_channel':
@@ -673,7 +668,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"✅ تم إرسال الإشعار بنجاح إلى `{sent}` مستخدم.")
             return
 
-    # --- شحن الرصيد بقبول مباشر من الإدارة ---
     if user.id == ADMIN_ID and context.user_data.get('admin_approving_user'):
         try:
             amount = float(text)
@@ -686,7 +680,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                 "🎉 **تـم التأكـد مـن بـيـانـات الدفـع بـنـجـاح!**\n\n"
                 "🟢 **الحالة:** مقبول ✅\n"
                 f"💰 تم شحن حسابك وإضافة مبلغ `{amount}` $ بنجاح إلى رصيدك.\n\n"
-                "✨ *يمكنك الآن الاستمتاع بجميع خدمات المتجر بكل سهولة. شكراً لتعاملكم معنا في **متجر B-Fix Software | AI Store**.*"
+                "✨ *يمكنك الآن الاستمتاع بجميع خدمات المتجر بكل سهولة.*"
             )
             await context.bot.send_message(chat_id=target_user, text=success_msg, parse_mode='Markdown')
         except Exception as e:
@@ -700,8 +694,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         rental_delivery_msg = (
             "🔑 **بيـانـات حـسـاب الإيـجـار الجـاهـز:**\n\n"
             f"📥 **بيانات الدخول:**\n{text}\n\n"
-            "⚠️ *يرجى عدم تغيير بيانات الحساب لكي لا يلغى الإيجار. نتمنى لك عملاً موفقاً!*\n\n"
-            "✨ — **متجر B-Fix Software | AI Store**"
+            "⚠️ *يرجى عدم تغيير بيانات الحساب لكي لا يلغى الإيجار.*"
         )
         await context.bot.send_message(chat_id=target_user, text=rental_delivery_msg, parse_mode='Markdown')
         await update.message.reply_text("✅ تم إرسال بيانات الإيجار للعميل بنجاح!")
@@ -724,18 +717,11 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                    (user.id, srv_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f"Email: {email}"))
         
         context.user_data.clear()
-        await update.message.reply_text(
-            "✅ **تـم اسـتـلام طـلـبك بـنـجـاح!**\n\n"
-            "⏳ يرجى الانتظار من **5 إلى 10 دقائق** كحد أقصى، ريثما يقوم فريق العمل بتجهيز وتفعيل اشتراكك على الإيميل الذي أرسلته.\n"
-            "سنرسل لك إشعاراً فور الانتهاء! 🌹\n\n"
-            "✨ **متجر B-Fix Software | AI Store**",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("✅ **تم استلام طلبك بنجاح وجاري التفعيل!**", parse_mode='Markdown')
         
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🔔 **طلب تفعيل أداة جديد!**\n▪️ العميل: {user_info[1]} (`{user.id}`)\n▪️ الأداة: {srv_name}\n▪️ الإيميل المرسل: `{email}`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎉 إرسال إشعار التفعيل للعميل", callback_data=f"send_activation_{user.id}_{srv_id}")]])
+            text=f"🔔 **طلب تفعيل أداة جديد!**\n▪️ العميل: {user_info[1]} (`{user.id}`)\n▪️ الأداة: {srv_name}\n▪️ الإيميل المرسل: `{email}`"
         )
         return
 
@@ -753,17 +739,8 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         db_execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user.id))
         context.user_data.clear()
         
-        await update.message.reply_text(
-            "⏳ **تـم اسـتـلام طـلـبك بـنـجـاح!**\n\n"
-            "جاري فحص الرقم والبحث عنه، وسيتم إرسال النتيجة فور الحصول على الاسم ومعلومات المتصل من النظام أو شركة الاتصالات.\n\n"
-            "✨ *شكراً لثقتك في **متجر B-Fix Software | AI Store**.*",
-            parse_mode='Markdown'
-        )
-        
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"💎 **طلب VIP (معرفة هوية متصل):**\n▪️ العميل: {user_info[1]} (`{user.id}`)\n▪️ الرقم المطلوب بحثه: `{phone_number}`"
-        )
+        await update.message.reply_text("⏳ **تم استلام طلبك وجاري فحص الرقم...**", parse_mode='Markdown')
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"💎 **طلب VIP (معرفة هوية متصل):**\n▪️ العميل: {user_info[1]} (`{user.id}`)\n▪️ الرقم المطلوب: `{phone_number}`")
         return
 
     if context.user_data.get('waiting_card'):
@@ -776,7 +753,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         db_execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (card[0], user.id))
         new_balance = db_fetch_one("SELECT balance FROM users WHERE user_id = ?", (user.id,))[0]
         context.user_data['waiting_card'] = False
-        await update.message.reply_text(f"✅ **تم الشحن بنجاح!**\n💰 القيمة: `{card[0]}` $\n💵 رصيدك الجديد: `{new_balance}` $\n\n✨ **متجر B-Fix Software | AI Store**", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ **تم الشحن بنجاح!**\n💰 القيمة: `{card[0]}` $\n💵 رصيدك الجديد: `{new_balance}` $", parse_mode='Markdown')
         return
 
     if update.message.photo and context.user_data.get('waiting_receipt'):
@@ -784,13 +761,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         method = context.user_data.get('payment_method_name', 'غير محدد')
         context.user_data.clear()
         
-        await update.message.reply_text(
-            "⏳ **تـم اسـتـلام إيـصـال الدفـع بـنـجـاح!**\n\n"
-            "جاري مراجعة السند من قبل الإدارة وسيتم شحن حسابك فوراً.\n\n"
-            "✨ *شكراً لثقتك في **متجر B-Fix Software | AI Store**.*",
-            parse_mode='Markdown'
-        )
-        
+        await update.message.reply_text("⏳ **تم استلام إيصال الدفع بنجاح وفي انتظار مراجعة الإدارة.**", parse_mode='Markdown')
         await context.bot.send_photo(
             chat_id=ADMIN_ID,
             photo=photo_file,
@@ -802,7 +773,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     if update.message: await update.message.reply_text("🚫 تم الإلغاء بنجاح.")
-    return ConversationHandler.END
+    return
 
 # ================= (7) التشغيل الرئيسي =================
 def main():
@@ -818,8 +789,9 @@ def main():
     app.add_handler(CallbackQueryHandler(main_buttons_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_text_messages))
 
-    print("\n🚀 متجر B-Fix Software | AI Store يعمل الآن بسرعة فائقة ومتصل بقاعدة بيانات Neon السحابية!")
+    print("\n🚀 متجر B-Fix Software | AI Store يعمل الآن بكامل طاقته ومميزاته!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
+
