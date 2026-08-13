@@ -1,5 +1,5 @@
 # ==============================================================================
-# |   B-Fix Smart Bot - النسخة السحابية المحسنة (Neon + Fast Updates + Custom Features) |
+# |   B-Fix Smart Bot - النسخة السحابية المحسنة (Neon + Admin /admin Security)   |
 # |   متجر B-Fix Software | AI Store                                            |
 # ==============================================================================
 
@@ -191,6 +191,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛒 ❲ اختر القسم المطلوب من القائمة أدناه ❳ 👇\n"
         "━━━━━━━━━━━━━━━━━━━━━"
     )
+    # الأزرار تظهر للعملاء بشكل طبيعي ونظيف جداً (بدون أزرار الإدارة)
     keyboard = [
         [InlineKeyboardButton(b_dig[0], callback_data=b_dig[1]), InlineKeyboardButton(b_sub[0], callback_data=b_sub[1])],
         [InlineKeyboardButton(b_ren[0], callback_data=b_ren[1])],
@@ -198,16 +199,35 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(b_ord[0], callback_data=b_ord[1]), InlineKeyboardButton(b_pro[0], callback_data=b_pro[1])],
         [InlineKeyboardButton(b_chg[0], callback_data=b_chg[1]), InlineKeyboardButton(b_fnd[0], callback_data=b_fnd[1])],
         [InlineKeyboardButton("🌐 واتساب", url=WHATSAPP_LINK), InlineKeyboardButton("🛠️ الدعم", url=SUPPORT_LINK)],
-        [InlineKeyboardButton("⚙️ لوحة التحكم للإدارة", callback_data="admin_panel")] if user.id == ADMIN_ID else InlineKeyboardButton("ℹ️ معلومات البوت", callback_data="bot_info")
+        [InlineKeyboardButton("ℹ️ معلومات البوت", callback_data="bot_info")]
     ]
-    if user.id == ADMIN_ID:
-        keyboard[-1].append(InlineKeyboardButton("ℹ️ معلومات", callback_data="bot_info"))
 
     markup = InlineKeyboardMarkup(keyboard)
     if update.message: await update.message.reply_text(text, reply_markup=markup, parse_mode='Markdown')
     elif update.callback_query: await update.callback_query.message.edit_text(text, reply_markup=markup, parse_mode='Markdown')
 
-# ================= (4) معالج الأزرار والتفاعلات والطلبات =================
+# ================= (4) أمر /admin الخاص بلوحة التحكم الآمنة =================
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ عذراً، هذا الأمر مخصص للمشرف فقط.")
+        return
+
+    admin_keyboard = [
+        [InlineKeyboardButton("🔴 خصم رصيد", callback_data="admin_sub_bal"), InlineKeyboardButton("🟢 إضافة رصيد", callback_data="admin_add_bal")],
+        [InlineKeyboardButton("🔍 بحث عن مستخدم", callback_data="admin_search_user"), InlineKeyboardButton("🎫 كود شحن", callback_data="admin_gen_card")],
+        [InlineKeyboardButton("✉️ مراسلة عميل عبر الآيدي", callback_data="admin_msg_user")],
+        [InlineKeyboardButton("📢 إدارة قنوات الاشتراك الإجباري", callback_data="admin_channels")],
+        [InlineKeyboardButton("🎛️ إدارة وتعديل أزرار القائمة", callback_data="admin_buttons_edit")],
+        [InlineKeyboardButton("🛠️ إدارة الخدمات والأقسام والأكواد", callback_data="admin_services")],
+        [InlineKeyboardButton("🗑️ حذف آخر إشعار", callback_data="admin_del_last"), InlineKeyboardButton("📢 إشعار جماعي", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("⚙️ صيانة البوت: 🟢 (مفعل)", callback_data="admin_toggle_maint")],
+        [InlineKeyboardButton("📊 إحصائيات المتجر", callback_data="admin_stats")],
+        [InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]
+    ]
+    await update.message.reply_text("👑 **لوحة تحكم المطور والمدير المتقدمة**\n\nاختر الإجراء المطلوب من الأزرار أدناه:", reply_markup=InlineKeyboardMarkup(admin_keyboard), parse_mode='Markdown')
+
+# ================= (5) معالج الأزرار والتفاعلات والطلبات =================
 async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     query = update.callback_query
@@ -308,7 +328,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         price = srv[0]
         srv_name = srv[1]
         
-        # (1) فحص الرصيد غير الكافي برساالة فخمة
         if user_info[0] < price and cat != "free":
             deficit = price - user_info[0]
             await query.message.edit_text(
@@ -326,7 +345,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        # (3) قسم العروض المجانية
         if cat == "free" or price == 0:
             db_execute("INSERT INTO orders (user_id, service_id, status, order_date) VALUES (?, ?, 'مكتمل ✅ مجاني', ?)", (user_id, srv_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             
@@ -338,12 +356,11 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 "✨ *نتمنى أن تنال إعجابك، ونتشرف دائماً بخدمتك في **متجر B-Fix Software | AI Store**.*"
             )
             await query.message.edit_text(free_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
-            if srv[3] and srv[3].startswith("AgAC"): # فحص لو كان ملف تليجرام
+            if srv[3] and srv[3].startswith("AgAC"):
                 try: await context.bot.send_document(chat_id=user_id, document=srv[3], caption="🎁 هدية مجانية من متجر B-Fix Software | AI Store")
                 except: pass
             return
 
-        # (5) عروض VIP والخدمات الخاصة
         if cat == "vip":
             if "رقم المتصل" in srv_name or "معرفة" in srv_name:
                 context.user_data['waiting_caller_id'] = True
@@ -361,10 +378,9 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await query.message.edit_text(bot_vip_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 تواصل معي عبر الواتساب 💬", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔴 رجوع", callback_data="main_menu")]]), parse_mode='Markdown')
                 return
 
-        # (2) قسم إيجار الأدوات
         if cat == "rentals":
             if user_info[0] < price:
-                return # تم التعامل معها بالأعلى
+                return
             db_execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user_id))
             db_execute("INSERT INTO orders (user_id, service_id, status, order_date) VALUES (?, ?, 'قيد التجهيز ⏳ إيجار', ?)", (user_id, srv_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             
@@ -376,7 +392,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]),
                 parse_mode='Markdown'
             )
-            # إشعار المدير
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=f"🔔 **طلب إيجار جديد قيد الانتظار!**\n▪️ العميل: {user_info[1]} (`{user_id}`)\n▪️ الأداة: {srv_name}\n\nيرجى سحب البيانات وتفعيلها للعميل.",
@@ -384,7 +399,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        # (1) شحن الأدوات والبوكسات والاشتراكات
         stock_key = db_fetch_one("SELECT id, key_text FROM product_keys WHERE service_id = ? AND is_sold = 0 LIMIT 1", (srv_id,))
         if cat in ["digital", "subscriptions"] and stock_key:
             new_balance = user_info[0] - price
@@ -396,7 +410,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await context.bot.send_message(chat_id=user_id, text=f"🎉 **تفاصيل اشتراكك:**\n\n{stock_key[1]}\n\n✨ **متجر B-Fix Software | AI Store**")
             return
 
-        # إذا لم تتوفر مفاتيح مخزنة، يطلب الإيميل من العميل للتفعيل اليدوي (5 إلى 10 دقائق)
         context.user_data['pending_srv_id'] = srv_id
         context.user_data['pending_price'] = price
         context.user_data['pending_name'] = srv_name
@@ -426,45 +439,12 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         info_msg = "🌟 **━━━━━ ❲ 𝐁-𝐅𝐢𝐱 𝐒𝐨𝐟𝐭𝐰𝐚𝐫𝐞 | 𝐀𝐈 𝐒𝐭𝐨𝐫𝐞 ❳ ━━━━━** 🌟\n\n🤖 نظام إدارة متجرك الآلي المتطور للخدمات الرقمية وشحن الأدوات."
         await query.message.edit_text(info_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
 
-    elif data == "admin_panel":
+    elif data == "admin_toggle_maint":
         if user_id != ADMIN_ID: return
-        admin_keyboard = [
-            [InlineKeyboardButton("➕ إضافة خدمات متعددة (دفعة واحدة)", callback_data="admin_add_batch")],
-            [InlineKeyboardButton("⚙️ تعيين رسالة صيانة البوت", callback_data="admin_set_maintenance")],
-            [InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]
-        ]
-        await query.message.edit_text("👑 **لوحة تحكم المدير - متجر B-Fix Software | AI Store**\n\nاختر الإجراء المطلوب:", reply_markup=InlineKeyboardMarkup(admin_keyboard), parse_mode='Markdown')
-
-    elif data == "admin_set_maintenance":
-        if user_id != ADMIN_ID: return
-        context.user_data['waiting_maintenance_msg'] = True
-        await query.message.edit_text("✍️ أرسل الآن **نص رسالة الصيانة المخصصة** التي تريد ظهورها للعملاء:\n(أو أرسل /cancel للإلغاء)")
-
-    elif data == "admin_add_batch":
-        if user_id != ADMIN_ID: return
-        categories = [
-            [InlineKeyboardButton("⚡ شحن الأدوات والبوكسات", callback_data="batch_cat_digital")],
-            [InlineKeyboardButton("🔵 الاشتراكات", callback_data="batch_cat_subscriptions")],
-            [InlineKeyboardButton("🔧 إيجار الأدوات", callback_data="batch_cat_rentals")],
-            [InlineKeyboardButton("💎 عروض VIP", callback_data="batch_cat_vip")],
-            [InlineKeyboardButton("🎁 عروض مجانية", callback_data="batch_cat_free")],
-            [InlineKeyboardButton("🔴 رجوع", callback_data="admin_panel")]
-        ]
-        await query.message.edit_text("📂 اختر **القسم** الذي تريد إضافة الخدمات إليه دفعة واحدة:", reply_markup=InlineKeyboardMarkup(categories))
-
-    elif data.startswith("batch_cat_"):
-        if user_id != ADMIN_ID: return
-        cat_chosen = data.replace("batch_cat_", "")
-        context.user_data['batch_category'] = cat_chosen
-        context.user_data['waiting_batch_services'] = True
-        await query.message.edit_text(
-            "📝 **إضافة خدمات متعددة دفعة واحدة:**\n\n"
-            "أرسل الخدمات الآن بالصيغة التالية (كل خدمة في سطر أو مفصولة بـ | أو بالشكل المناسب):\n"
-            "مثال:\n"
-            "اسم الخدمة | الوصف | مدة التسليم | مدة الاشتراك | السعر\n\n"
-            "أو اكتبها بوضوح وسيقوم البوت بحفظها فوراً في القسم المحدد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 إلغاء", callback_data="admin_panel")]])
-        )
+        status, msg = get_maintenance_status()
+        new_status = 0 if status else 1
+        db_execute("UPDATE maintenance_mode SET is_active = ? WHERE id = 1", (new_status,))
+        await query.answer(f"✅ تم تغيير وضع الصيانة إلى: {'مفعل' if new_status==1 else 'معطل'}", show_alert=True)
 
     elif data.startswith("approve_fund_"):
         if user_id != ADMIN_ID: return
@@ -476,7 +456,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "main_menu":
         await start_command(update, context)
 
-# ================= (5) معالج الرسائل النصية والإشعارات الإدارية =================
+# ================= (6) معالج الرسائل النصية والإشعارات الإدارية =================
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip() if update.message.text else ""
@@ -485,39 +465,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         if not await check_maintenance(update, context): return
         if not await enforce_subscription(update, context): return
 
-    # (7) إعداد رسالة الصيانة المخصصة من المدير
-    if user.id == ADMIN_ID and context.user_data.get('waiting_maintenance_msg'):
-        db_execute("UPDATE maintenance_mode SET is_active = 1, custom_message = ? WHERE id = 1", (text,))
-        context.user_data.clear()
-        await update.message.reply_text(f"✅ **تم تفعيل وضع الصيانة بنجاح!**\nالرسالة المخصصة المعروضة للعملاء:\n\n{text}")
-        return
-
-    # (6) لوحة التحكم: إضافة خدمات متعددة دفعة واحدة
-    if user.id == ADMIN_ID and context.user_data.get('waiting_batch_services'):
-        cat = context.user_data.get('batch_category', 'digital')
-        lines = text.split("\n")
-        added_count = 0
-        for line in lines:
-            if not line.strip(): continue
-            parts = [p.strip() for p in line.split("|")]
-            s_name = parts[0] if len(parts) > 0 else "خدمة جديدة"
-            s_desc = parts[1] if len(parts) > 1 else "بدون وصف"
-            s_delivery = parts[2] if len(parts) > 2 else "5 إلى 10 دقائق"
-            s_duration = parts[3] if len(parts) > 3 else "دائم"
-            try:
-                s_price = float(parts[4]) if len(parts) > 4 else 0.0
-            except:
-                s_price = 0.0
-            
-            db_execute("INSERT INTO services (name, description, price, duration, delivery_time, category) VALUES (?, ?, ?, ?, ?, ?)",
-                       (s_name, s_desc, s_price, s_duration, s_delivery, cat))
-            added_count += 1
-            
-        context.user_data.clear()
-        await update.message.reply_text(f"✅ **تمت إضافة عدد ({added_count}) خدمة بنجاح في القسم المطلوب!**\n\n✨ **متجر B-Fix Software | AI Store**")
-        return
-
-    # إدخال المبلغ لشحن رصيد العميل بعد إرسال الإيصال
     if user.id == ADMIN_ID and context.user_data.get('admin_approving_user'):
         try:
             amount = float(text)
@@ -526,7 +473,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.clear()
             await update.message.reply_text(f"✅ تم إضافة مبلغ `{amount}` $ للعميل بنجاح!")
             
-            # رسالة نجاح فخمة للعميل
             success_msg = (
                 "🎉 **تـم التأكـد مـن بـيـانـات الدفـع بـنـجـاح!**\n\n"
                 "🟢 **الحالة:** مقبول ✅\n"
@@ -538,7 +484,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"❌ خطأ في المبلغ المدخل: {e}")
         return
 
-    # إرسال بيانات الإيجار من المدير للعميل
     if user.id == ADMIN_ID and context.user_data.get('admin_target_rental_user'):
         target_user = context.user_data.get('admin_target_rental_user')
         context.user_data.clear()
@@ -553,7 +498,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("✅ تم إرسال بيانات الإيجار للعميل بنجاح!")
         return
 
-    # (1) استقبال الإيميل للشحن اليدوي (5 إلى 10 دقائق)
     if context.user_data.get('waiting_email_input'):
         email = text
         srv_id = context.user_data.get('pending_srv_id')
@@ -579,7 +523,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='Markdown'
         )
         
-        # إشعار المدير
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=f"🔔 **طلب تفعيل أداة جديد!**\n▪️ العميل: {user_info[1]} (`{user.id}`)\n▪️ الأداة: {srv_name}\n▪️ الإيميل المرسل: `{email}`",
@@ -587,7 +530,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # (5) استقبال رقم الهاتف لخدمة معرفة هوية المتصل (VIP)
     if context.user_data.get('waiting_caller_id'):
         phone_number = text
         srv_name = context.user_data.get('vip_name')
@@ -609,14 +551,12 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='Markdown'
         )
         
-        # إشعار المدير بالطلب والرقم
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=f"💎 **طلب VIP (معرفة هوية متصل):**\n▪️ العميل: {user_info[1]} (`{user.id}`)\n▪️ الرقم المطلوب بحثه: `{phone_number}`"
         )
         return
 
-    # شحن الرصيد بكود البطاقة
     if context.user_data.get('waiting_card'):
         code = text
         card = db_fetch_one("SELECT amount, is_used FROM cards WHERE code = ?", (code,))
@@ -630,7 +570,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"✅ **تم الشحن بنجاح!**\n💰 القيمة: `{card[0]}` $\n💵 رصيدك الجديد: `{new_balance}` $\n\n✨ **متجر B-Fix Software | AI Store**", parse_mode='Markdown')
         return
 
-    # استقبال صورة سند التحويل من العميل لتغذية الرصيد
     if update.message.photo and context.user_data.get('waiting_receipt'):
         photo_file = update.message.photo[-1].file_id
         method = context.user_data.get('payment_method_name', 'غير محدد')
@@ -643,7 +582,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='Markdown'
         )
         
-        # إرسال الصورة وإشعار المدير مع زر الموافقة
         await context.bot.send_photo(
             chat_id=ADMIN_ID,
             photo=photo_file,
@@ -657,7 +595,7 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message: await update.message.reply_text("🚫 تم الإلغاء بنجاح.")
     return ConversationHandler.END
 
-# ================= (6) التشغيل الرئيسي =================
+# ================= (7) التشغيل الرئيسي =================
 def main():
     init_db()
     try: urllib.request.urlopen(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook").read()
@@ -666,6 +604,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).concurrent_updates(True).build()
     
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("admin", admin_command))  # لوحة التحكم تعمل حصرياً عبر /admin للمشرف
     app.add_handler(CommandHandler("cancel", cancel_handler))
     app.add_handler(CallbackQueryHandler(main_buttons_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_text_messages))
@@ -675,3 +614,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
