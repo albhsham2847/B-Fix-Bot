@@ -1,5 +1,5 @@
 # ==============================================================================
-# |   B-Fix Smart Bot - الكود الكامل والمتكامل (Neon Database + All Features)   |
+# |   B-Fix Smart Bot - النسخة السحابية المحدثة (Neon + Dotenv + Users Info)     |
 # ==============================================================================
 
 import os
@@ -11,12 +11,16 @@ import urllib.request
 import psycopg2
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
+from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler, 
     ContextTypes, ConversationHandler, MessageHandler, filters
 )
 from telegram.warnings import PTBUserWarning
+
+# تحميل متغيرات البيئة من ملف .env
+load_dotenv()
 
 warnings.filterwarnings("ignore", category=PTBUserWarning)
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -37,16 +41,14 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# ================= (1) الإعدادات =================
-BOT_TOKEN = "8299192931:AAHkXI_BLyoAp8TvrSCU9i_CnoDSyDFbTGA"  # ⬅️ ضع التوكن هنا
-ADMIN_ID = 8218627841  # ⬅️ ضع الآيدي الخاص بك كرقْم
+# ================= (1) الإعدادات وقراءة متغيرات البيئة =================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 WHATSAPP_LINK = "https://iwtsp.com/967777728478"
 SUPPORT_LINK = "https://t.me/bfixSoftware"
 CHANNEL_LINK = "https://t.me/+0QKwgEMQwHg2Y2U0"
-
-# 📌 رابط قاعدة بيانات Neon الخاص بك
-DATABASE_URL = "postgresql://neondb_owner:npg_pHWc7KyUokY5@ep-orange-wave-axvshjaq-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 COLOR_PRIMARY = "🔵"
 COLOR_SUCCESS = "🟢"
@@ -105,7 +107,14 @@ def init_db():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cursor = conn.cursor()
     try:
-        cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, name TEXT, balance REAL DEFAULT 0.0, join_date TEXT)''')
+        # جدول المستخدمين المحدث ليشمل username
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+                            user_id BIGINT PRIMARY KEY, 
+                            name TEXT, 
+                            username TEXT, 
+                            balance REAL DEFAULT 0.0, 
+                            join_date TEXT
+                          )''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS services (id SERIAL PRIMARY KEY, name TEXT, description TEXT, price REAL, duration TEXT, category TEXT DEFAULT 'digital', quantity INTEGER DEFAULT 0, file_id TEXT)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS orders (id SERIAL PRIMARY KEY, user_id BIGINT, service_id INTEGER, status TEXT, order_date TEXT, custom_data TEXT)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS cards (code TEXT PRIMARY KEY, amount REAL, is_used INTEGER DEFAULT 0)''')
@@ -139,13 +148,13 @@ def init_db():
     finally:
         cursor.close()
         conn.close()
-    print("\n✅ تم الاتصال بقاعدة بيانات Neon السحابية بنجاح!")
+    print("\n✅ تم الاتصال بقاعدة بيانات Neon السحابية بنجاح وتم فحص الجداول!")
 
-def add_user_if_not_exists(user_id, name):
+def add_user_if_not_exists(user_id, name, username):
     user = db_fetch_one("SELECT * FROM users WHERE user_id = ?", (user_id,))
     if not user:
-        db_execute("INSERT INTO users (user_id, name, balance, join_date) VALUES (?, ?, ?, ?)", 
-                   (user_id, name, 0.0, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        db_execute("INSERT INTO users (user_id, name, username, balance, join_date) VALUES (?, ?, ?, ?, ?)", 
+                   (user_id, name, username, 0.0, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
 def is_bot_under_maintenance():
     status = db_fetch_one("SELECT is_active FROM maintenance_mode WHERE id = 1")
@@ -198,7 +207,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_maintenance(update, context, is_admin=(user.id == ADMIN_ID)): return
     if not await enforce_subscription(update, context): return
     
-    add_user_if_not_exists(user.id, user.first_name)
+    # حفظ المستخدم في قاعدة بيانات Neon تلقائياً (الآيدي، الاسم، اليوزر، وتاريخ الانضمام)
+    username = f"@{user.username}" if user.username else "لا يوجد"
+    add_user_if_not_exists(user.id, user.first_name, username)
     
     b_dig = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('cat_digital',))
     b_sub = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('cat_subscriptions',))
@@ -685,8 +696,8 @@ async def adm_rx_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def adm_rx_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = db_fetch_one("SELECT name, balance, join_date FROM users WHERE user_id = ?", (int(update.message.text),))
-    if user: await update.message.reply_text(f"👤 الاسم: {user[0]}\n💰 الرصيد: {user[1]}$\n📅 الانضمام: {user[2]}")
+    user = db_fetch_one("SELECT name, username, balance, join_date FROM users WHERE user_id = ?", (int(update.message.text),))
+    if user: await update.message.reply_text(f"👤 الاسم: {user[0]}\n🔗 يوزر: {user[1]}\n💰 الرصيد: {user[2]}$\n📅 الانضمام: {user[3]}")
     else: await update.message.reply_text("❌ غير موجود.")
     return ConversationHandler.END
 
