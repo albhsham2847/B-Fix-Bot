@@ -349,9 +349,21 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.message.edit_text("❌ **عذراً، نفدت الكمية لهذه الخدمة حالياً!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع", callback_data="main_menu")]]))
             return
 
-        if user_info[0] < price:
-            await query.answer("❌ رصيدك غير كافٍ لإتمام العملية!", show_alert=True)
+                if user_info[0] < price:
+            await query.message.edit_text(
+                f"❌ **عذراً، رصيدك غير كافٍ لإتمام الشراء!**\n\n"
+                f"💰 رصيدك الحالي: `{user_info[0]}` $\n"
+                f"💵 سعر الخدمة: `{price}` $\n"
+                f"⚠️ العجز لديك: `{price - user_info[0]}` $\n\n"
+                f"يرجى تغذية حسابك أولاً للاستفادة من الخدمات.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🟢 تغذية رصيد الحساب", callback_data="fund_account")],
+                    [InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]
+                ]),
+                parse_mode='Markdown'
+            )
             return
+
 
         if cat == "rentals":
             context.user_data['pending_rental_srv_id'] = srv_id
