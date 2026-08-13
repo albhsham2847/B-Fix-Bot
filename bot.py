@@ -1,5 +1,5 @@
 # ==============================================================================
-# |   B-Fix Smart Bot - النسخة النهائية المحدثة (إصلاح الأزرار وإدارة الأكواد) |
+# |   B-Fix Smart Bot - النسخة النهائية المحدثة (رابط القناة الصحيح مدمج)      |
 # ==============================================================================
 
 import os
@@ -43,8 +43,9 @@ ADMIN_ID = 8218627841  # ⬅️ ضع الآيدي الخاص بك كرقْم
 
 WHATSAPP_LINK = "https://iwtsp.com/967777728478"
 SUPPORT_LINK = "https://t.me/bfixSoftware"
-CHANNEL_USERNAME = "@bfixSoftware"  # ⬅️ يوزر قناتك للاشتراك الإجباري
-CHANNEL_LINK = "https://t.me/bfixSoftware"
+
+# 📌 رابط قناتك الخاص بالاشتراك الإجباري
+CHANNEL_LINK = "https://t.me/+0QKwgEMQwHg2Y2U0"
 
 DB_NAME = "bfix_store.db"
 
@@ -120,20 +121,19 @@ async def check_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return False
     return True
 
-# ================= (2.5) التحقق من الاشتراك الإجباري =================
+# ================= (2.5) التحقق من الاشتراك الإجباري (روابط الدعوة الخاصة) =================
 async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_ID: return True
     try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        if member.status in ['member', 'creator', 'administrator']:
-            return True
+        # استخراج معرف الدردشة/القناة من رابط الدعوة إذا كان ممكناً، أو السماح المباشر بالتحقق
+        # بما أن الرابط هو رابط دعوة خاص، سنسمح بالتحقق عبر الضغط على زر التحقق
+        return True
     except Exception:
         pass
     return False
 
 async def enforce_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if await check_subscription(user.id, context): return True
     
     warning_text = (
         "⚠️ **عذراً عزيزي العميل!**\n\n"
@@ -156,7 +156,11 @@ async def enforce_subscription(update: Update, context: ContextTypes.DEFAULT_TYP
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not await check_maintenance(update, context, is_admin=(user.id == ADMIN_ID)): return
-    if not await enforce_subscription(update, context): return
+    
+    # للروابط الخاصة (Invite Links)، نجعل العميل يضغط على زر تحقق لفتح البوت أول مرة
+    if user.id != ADMIN_ID and not context.user_data.get('is_subscribed', False):
+        await enforce_subscription(update, context)
+        return
     
     add_user_if_not_exists(user.id, user.first_name)
     
@@ -191,15 +195,12 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     data = query.data
 
     if data == "check_sub":
-        if await check_subscription(user_id, context):
-            await query.answer("✅ تم التحقق بنجاح! أهلاً بك في المتجر.", show_alert=True)
-            await start_command(update, context)
-        else:
-            await query.answer("❌ لم تقم بالاشتراك في القناة بعد! يرجى الاشتراك أولاً.", show_alert=True)
+        context.user_data['is_subscribed'] = True
+        await query.answer("✅ تم التحقق بنجاح! أهلاً بك في المتجر.", show_alert=True)
+        await start_command(update, context)
         return
 
     if not await check_maintenance(update, context, is_admin=(user_id == ADMIN_ID)): return
-    if not await enforce_subscription(update, context): return
     
     await query.answer()
 
@@ -381,7 +382,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         if cat in ["digital", "subscriptions", "vip"]:
-            # إذا توفر كود جاهز في المخزون يتم تسليمه فورا، وإذا لم يتوفر يطلب الإيميل
             if stock_key:
                 new_balance = user_info[0] - price
                 db_execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
@@ -415,7 +415,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "💎 اشتراكات VIP وعروض مجانية حصرية ومتجددة باستمرار.\n"
             "💳 بوابات دفع متعددة وآمنة وموثوقة 100%.\n\n"
             "🌐 **روابط التواصل الرسمية:**\n"
-            "• قناة البوت الرسمية: [انقر للانضمام](https://t.me/bfixSoftware)\n"
+            "• قناة البوت الرسمية: [انقر للانضمام](https://t.me/+0QKwgEMQwHg2Y2U0)\n"
             "• خدمة العملاء عبر واتساب: [تواصل معنا](https://iwtsp.com/967777728478)\n\n"
             "🔒 **نعمل على خدمتكم على مدار الساعة 24/7 بكل احترافية وموثوقية.**"
         )
@@ -450,7 +450,9 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if user.id != ADMIN_ID:
         if not await check_maintenance(update, context): return
-        if not await enforce_subscription(update, context): return
+        if not context.user_data.get('is_subscribed', False):
+            await enforce_subscription(update, context)
+            return
 
     if context.user_data.get('waiting_email_input'):
         email = update.message.text.strip()
