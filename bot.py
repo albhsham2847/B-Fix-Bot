@@ -1,5 +1,5 @@
 # ==============================================================================
-# |   B-Fix Smart Bot - النسخة السحابية المحسنة (Neon + Admin /admin Security)   |
+# |   B-Fix Smart Bot - النسخة السحابية الكاملة والنهائية (Neon + Full Admin)   |
 # |   متجر B-Fix Software | AI Store                                            |
 # ==============================================================================
 
@@ -191,7 +191,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛒 ❲ اختر القسم المطلوب من القائمة أدناه ❳ 👇\n"
         "━━━━━━━━━━━━━━━━━━━━━"
     )
-    # الأزرار تظهر للعملاء بشكل طبيعي ونظيف جداً (بدون أزرار الإدارة)
+    # أزرار العميل النظيفة
     keyboard = [
         [InlineKeyboardButton(b_dig[0], callback_data=b_dig[1]), InlineKeyboardButton(b_sub[0], callback_data=b_sub[1])],
         [InlineKeyboardButton(b_ren[0], callback_data=b_ren[1])],
@@ -213,6 +213,9 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ عذراً، هذا الأمر مخصص للمشرف فقط.")
         return
 
+    status, _ = get_maintenance_status()
+    maint_label = "🟢 (مفعل)" if status == 1 else "🔴 (معطل)"
+
     admin_keyboard = [
         [InlineKeyboardButton("🔴 خصم رصيد", callback_data="admin_sub_bal"), InlineKeyboardButton("🟢 إضافة رصيد", callback_data="admin_add_bal")],
         [InlineKeyboardButton("🔍 بحث عن مستخدم", callback_data="admin_search_user"), InlineKeyboardButton("🎫 كود شحن", callback_data="admin_gen_card")],
@@ -221,7 +224,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎛️ إدارة وتعديل أزرار القائمة", callback_data="admin_buttons_edit")],
         [InlineKeyboardButton("🛠️ إدارة الخدمات والأقسام والأكواد", callback_data="admin_services")],
         [InlineKeyboardButton("🗑️ حذف آخر إشعار", callback_data="admin_del_last"), InlineKeyboardButton("📢 إشعار جماعي", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("⚙️ صيانة البوت: 🟢 (مفعل)", callback_data="admin_toggle_maint")],
+        [InlineKeyboardButton(f"⚙️ صيانة البوت: {maint_label}", callback_data="admin_toggle_maint")],
         [InlineKeyboardButton("📊 إحصائيات المتجر", callback_data="admin_stats")],
         [InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]
     ]
@@ -244,9 +247,12 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     
     await query.answer()
 
+    # --- الأقسام الرئيسية للعملاء ---
     if data == "my_profile":
         user_info = db_fetch_one("SELECT name, balance FROM users WHERE user_id = ?", (user_id,))
-        text = f"👤 **ملفك الشخصي:**\n\n▪️ **الاسم:** {user_info[0]}\n▪️ **الآيدي:** `{user_id}`\n▪️ **الرصيد:** `{user_info[1]}` $\n\n✨ **متجر B-Fix Software | AI Store**"
+        bal = user_info[1] if user_info else 0.0
+        name = user_info[0] if user_info else query.from_user.first_name
+        text = f"👤 **ملفك الشخصي:**\n\n▪️ **الاسم:** {name}\n▪️ **الآيدي:** `{user_id}`\n▪️ **الرصيد:** `{bal}` $\n\n✨ **متجر B-Fix Software | AI Store**"
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 تغذية حسابك", callback_data="fund_account")], [InlineKeyboardButton("🔴 رجوع", callback_data="main_menu")]]), parse_mode='Markdown')
 
     elif data == "charge_account":
@@ -356,9 +362,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 "✨ *نتمنى أن تنال إعجابك، ونتشرف دائماً بخدمتك في **متجر B-Fix Software | AI Store**.*"
             )
             await query.message.edit_text(free_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
-            if srv[3] and srv[3].startswith("AgAC"):
-                try: await context.bot.send_document(chat_id=user_id, document=srv[3], caption="🎁 هدية مجانية من متجر B-Fix Software | AI Store")
-                except: pass
             return
 
         if cat == "vip":
@@ -439,12 +442,108 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         info_msg = "🌟 **━━━━━ ❲ 𝐁-𝐅𝐢𝐱 𝐒𝐨𝐟𝐭𝐰𝐚𝐫𝐞 | 𝐀𝐈 𝐒𝐭𝐨𝐫𝐞 ❳ ━━━━━** 🌟\n\n🤖 نظام إدارة متجرك الآلي المتطور للخدمات الرقمية وشحن الأدوات."
         await query.message.edit_text(info_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
 
+    # --- وظائف أزرار لوحة تحكم المشرف (Admin) ---
+    elif data == "admin_add_bal":
+        if user_id != ADMIN_ID: return
+        context.user_data['admin_action'] = 'add_balance'
+        await query.message.reply_text("✍️ أرسل **آيدي (ID) العميل** أولاً لإضافة الرصيد له:")
+
+    elif data == "admin_sub_bal":
+        if user_id != ADMIN_ID: return
+        context.user_data['admin_action'] = 'sub_balance'
+        await query.message.reply_text("✍️ أرسل **آيدي (ID) العميل** أولاً لخصم الرصيد منه:")
+
+    elif data == "admin_search_user":
+        if user_id != ADMIN_ID: return
+        context.user_data['admin_action'] = 'search_user'
+        await query.message.reply_text("🔍 أرسل **آيدي (ID) العميل** أو اسم المستخدم للبحث عنه:")
+
+    elif data == "admin_gen_card":
+        if user_id != ADMIN_ID: return
+        context.user_data['admin_action'] = 'gen_card'
+        await query.message.reply_text("🎫 أرسل **قيمة كود الشحن** (رقم فقط، مثلاً: 10):")
+
+    elif data == "admin_msg_user":
+        if user_id != ADMIN_ID: return
+        context.user_data['admin_action'] = 'msg_user_id_step1'
+        await query.message.reply_text("✉️ أرسل **آيدي (ID) العميل** المراد مراسلته:")
+
+    elif data == "admin_channels":
+        if user_id != ADMIN_ID: return
+        channels = db_fetch_all("SELECT id, name, link FROM forced_channels")
+        text = "📢 **قنوات الاشتراك الإجباري الحالية:**\n\n"
+        if channels:
+            for ch in channels:
+                text += f"▪️ [{ch[1]}]({ch[2]})\n"
+        else:
+            text += "لا توجد قنوات مضافة حالياً.\n"
+        text += "\nلإضافة قناة جديدة، أرسل بالصيغة:\n`اسم القناة | الرابط`"
+        context.user_data['admin_action'] = 'add_channel'
+        await query.message.reply_text(text, parse_mode='Markdown')
+
+    elif data == "admin_buttons_edit":
+        if user_id != ADMIN_ID: return
+        await query.message.reply_text("🎛️ لتعديل أزرار القائمة الرئيسية، يمكنك تعديل العبارات في جدول `custom_buttons` بقاعدة البيانات مباشرة بكل سهولة.")
+
+    elif data == "admin_services":
+        if user_id != ADMIN_ID: return
+        srvs = db_fetch_all("SELECT id, name, price, category FROM services")
+        text = "🛠️ **قائمة الخدمات المسجلة:**\n\n"
+        if srvs:
+            for s in srvs:
+                text += f"🆔 `{s[0]}` - **{s[1]}** ({s[3]}) | السعر: {s[2]}$\n"
+        else:
+            text += "لا توجد خدمات مضافة.\n"
+        text += "\nلإضافة خدمة جديدة عبر البايثون أو قاعدة البيانات، أو تواصل معي لإضافتها فوراً."
+        await query.message.reply_text(text, parse_mode='Markdown')
+
+    elif data == "admin_del_last":
+        if user_id != ADMIN_ID: return
+        db_execute("DELETE FROM orders WHERE id = (SELECT MAX(id) FROM orders)")
+        await query.answer("🗑️ تم حذف آخر طلب/إشعار بنجاح!", show_alert=True)
+
+    elif data == "admin_broadcast":
+        if user_id != ADMIN_ID: return
+        context.user_data['admin_action'] = 'broadcast'
+        await query.message.reply_text("📢 أرسل **الرسالة أو الإشعار** المراد إرساله لجميع عملاء المتجر الآن:")
+
     elif data == "admin_toggle_maint":
         if user_id != ADMIN_ID: return
         status, msg = get_maintenance_status()
-        new_status = 0 if status else 1
+        new_status = 0 if status == 1 else 1
         db_execute("UPDATE maintenance_mode SET is_active = ? WHERE id = 1", (new_status,))
-        await query.answer(f"✅ تم تغيير وضع الصيانة إلى: {'مفعل' if new_status==1 else 'معطل'}", show_alert=True)
+        await query.answer(f"✅ تم تغيير وضع الصيانة بنجاح!", show_alert=True)
+        # تحديث رسالة اللوحة فوراً
+        try:
+            maint_label = "🟢 (مفعل)" if new_status == 1 else "🔴 (معطل)"
+            admin_keyboard = [
+                [InlineKeyboardButton("🔴 خصم رصيد", callback_data="admin_sub_bal"), InlineKeyboardButton("🟢 إضافة رصيد", callback_data="admin_add_bal")],
+                [InlineKeyboardButton("🔍 بحث عن مستخدم", callback_data="admin_search_user"), InlineKeyboardButton("🎫 كود شحن", callback_data="admin_gen_card")],
+                [InlineKeyboardButton("✉️ مراسلة عميل عبر الآيدي", callback_data="admin_msg_user")],
+                [InlineKeyboardButton("📢 إدارة قنوات الاشتراك الإجباري", callback_data="admin_channels")],
+                [InlineKeyboardButton("🎛️ إدارة وتعديل أزرار القائمة", callback_data="admin_buttons_edit")],
+                [InlineKeyboardButton("🛠️ إدارة الخدمات والأقسام والأكواد", callback_data="admin_services")],
+                [InlineKeyboardButton("🗑️ حذف آخر إشعار", callback_data="admin_del_last"), InlineKeyboardButton("📢 إشعار جماعي", callback_data="admin_broadcast")],
+                [InlineKeyboardButton(f"⚙️ صيانة البوت: {maint_label}", callback_data="admin_toggle_maint")],
+                [InlineKeyboardButton("📊 إحصائيات المتجر", callback_data="admin_stats")],
+                [InlineKeyboardButton("🔴 العودة للقائمة الرئيسية", callback_data="main_menu")]
+            ]
+            await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(admin_keyboard))
+        except: pass
+
+    elif data == "admin_stats":
+        if user_id != ADMIN_ID: return
+        users_count = db_fetch_one("SELECT COUNT(*) FROM users")[0]
+        orders_count = db_fetch_one("SELECT COUNT(*) FROM orders")[0]
+        services_count = db_fetch_one("SELECT COUNT(*) FROM services")[0]
+        stats_text = (
+            "📊 **إحصائيات متجر B-Fix Software:**\n\n"
+            f"👤 إجمالي العملاء المسجلين: `{users_count}`\n"
+            f"📦 إجمالي الطلبات الكلية: `{orders_count}`\n"
+            f"🛠️ إجمالي الخدمات والأدوات: `{services_count}`\n\n"
+            "✨ **متجر B-Fix Software | AI Store**"
+        )
+        await query.message.edit_text(stats_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔴 رجوع", callback_data="main_menu")]]), parse_mode='Markdown')
 
     elif data.startswith("approve_fund_"):
         if user_id != ADMIN_ID: return
@@ -456,7 +555,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "main_menu":
         await start_command(update, context)
 
-# ================= (6) معالج الرسائل النصية والإشعارات الإدارية =================
+# ================= (6) معالج الرسائل النصية والإشعارات الإدارية والعمليات =================
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip() if update.message.text else ""
@@ -465,6 +564,116 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         if not await check_maintenance(update, context): return
         if not await enforce_subscription(update, context): return
 
+    # --- معالجة مهام المشرف الإدارية (Admin Actions) ---
+    if user.id == ADMIN_ID and context.user_data.get('admin_action'):
+        action = context.user_data.get('admin_action')
+
+        if action == 'add_balance':
+            context.user_data['target_user_id'] = int(text)
+            context.user_data['admin_action'] = 'add_balance_amount'
+            await query_msg = await update.message.reply_text("✍️ أرسل الآن **المبلغ المراد إضافته** لرصيد هذا العميل:")
+            return
+
+        elif action == 'add_balance_amount':
+            target_id = context.user_data.get('target_user_id')
+            amount = float(text)
+            db_execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
+            context.user_data.clear()
+            await update.message.reply_text(f"✅ تم إضافة مبلغ `{amount}` $ للعميل `{target_id}` بنجاح!")
+            try: await context.bot.send_message(chat_id=target_id, text=f"🎉 تم إضافة مبلغ `{amount}` $ إلى رصيدك بواسطة الإدارة!")
+            except: pass
+            return
+
+        elif action == 'sub_balance':
+            context.user_data['target_user_id'] = int(text)
+            context.user_data['admin_action'] = 'sub_balance_amount'
+            await update.message.reply_text("✍️ أرسل الآن **المبلغ المراد خصمه** من رصيد هذا العميل:")
+            return
+
+        elif action == 'sub_balance_amount':
+            target_id = context.user_data.get('target_user_id')
+            amount = float(text)
+            db_execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, target_id))
+            context.user_data.clear()
+            await update.message.reply_text(f"✅ تم خصم مبلغ `{amount}` $ من العميل `{target_id}` بنجاح!")
+            try: await context.bot.send_message(chat_id=target_id, text=f"⚠️ تم خصم مبلغ `{amount}` $ من رصيدك بواسطة الإدارة.")
+            except: pass
+            return
+
+        elif action == 'search_user':
+            user_data = db_fetch_one("SELECT user_id, name, username, balance, join_date FROM users WHERE user_id::TEXT = ? OR username = ?", (text, text))
+            context.user_data.clear()
+            if user_data:
+                await update.message.reply_text(
+                    f"👤 **نتيجة البحث عن المستخدم:**\n\n"
+                    f"▪️ الاسم: {user_data[1]}\n"
+                    f"▪️ الآيدي: `{user_data[0]}`\n"
+                    f"▪️ المعرف: {user_data[2]}\n"
+                    f"▪️ الرصيد: `{user_data[3]}` $\n"
+                    f"▪️ تاريخ الانضمام: {user_data[4]}"
+                )
+            else:
+                await update.message.reply_text("❌ لم يتم العثور على هذا المستخدم في قاعدة البيانات.")
+            return
+
+        elif action == 'gen_card':
+            try:
+                amount = float(text)
+                import random, string
+                code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+                db_execute("INSERT INTO cards (code, amount, is_used) VALUES (?, ?, 0)", (code, amount))
+                context.user_data.clear()
+                await update.message.reply_text(
+                    f"🎫 **تم إنشاء كود الشحن بنجاح!**\n\n"
+                    f"🔑 الكود: `{code}`\n"
+                    f"💰 القيمة: `{amount}` $\n\n"
+                    "يمكن للعميل شحنه عبر زر (شحن بكود بطاقة)."
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطأ: {e}")
+            return
+
+        elif action == 'msg_user_id_step1':
+            context.user_data['target_msg_user'] = int(text)
+            context.user_data['admin_action'] = 'msg_user_id_step2'
+            await update.message.reply_text("✍️ أرسل الآن **نص الرسالة** التي تريد إرسالها لهذا العميل:")
+            return
+
+        elif action == 'msg_user_id_step2':
+            target_id = context.user_data.get('target_msg_user')
+            context.user_data.clear()
+            try:
+                await context.bot.send_message(chat_id=target_id, text=f"📬 **رسالة من إدارة المتجر:**\n\n{text}")
+                await update.message.reply_text("✅ تم إرسال الرسالة للعميل بنجاح!")
+            except Exception as e:
+                await update.message.reply_text(f"❌فشل الإرسال: {e}")
+            return
+
+        elif action == 'add_channel':
+            try:
+                parts = text.split("|")
+                name = parts[0].strip()
+                link = parts[1].strip()
+                db_execute("INSERT INTO forced_channels (name, link) VALUES (?, ?)", (name, link))
+                context.user_data.clear()
+                await update.message.reply_text("✅ تم إضافة قناة الاشتراك الإجباري بنجاح!")
+            except:
+                await update.message.reply_text("❌ صيغة خاطئة. يرجى الإرسال هكذا: `اسم القناة | الرابط`", parse_mode='Markdown')
+            return
+
+        elif action == 'broadcast':
+            context.user_data.clear()
+            users = db_fetch_all("SELECT user_id FROM users")
+            sent = 0
+            for u in users:
+                try:
+                    await context.bot.send_message(chat_id=u[0], text=f"📢 **إشعار هام من إدارة المتجر:**\n\n{text}")
+                    sent += 1
+                except: pass
+            await update.message.reply_text(f"✅ تم إرسال الإشعار بنجاح إلى `{sent}` مستخدم.")
+            return
+
+    # --- شحن الرصيد بقبول مباشر من الإدارة ---
     if user.id == ADMIN_ID and context.user_data.get('admin_approving_user'):
         try:
             amount = float(text)
@@ -604,7 +813,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).concurrent_updates(True).build()
     
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("admin", admin_command))  # لوحة التحكم تعمل حصرياً عبر /admin للمشرف
+    app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("cancel", cancel_handler))
     app.add_handler(CallbackQueryHandler(main_buttons_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_text_messages))
