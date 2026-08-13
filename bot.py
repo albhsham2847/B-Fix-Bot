@@ -1,14 +1,14 @@
 # ==============================================================================
-# |   B-Fix Smart Bot - النسخة الاحترافية الكاملة (إدارة القنوات والأزرار كلياً)  |
+# |   B-Fix Smart Bot - الكود الكامل والمتكامل (Neon Database + All Features)   |
 # ==============================================================================
 
 import os
-import sqlite3
 import logging
 import asyncio
 import warnings
 import threading
 import urllib.request
+import psycopg2
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,8 +43,10 @@ ADMIN_ID = 8218627841  # ⬅️ ضع الآيدي الخاص بك كرقْم
 
 WHATSAPP_LINK = "https://iwtsp.com/967777728478"
 SUPPORT_LINK = "https://t.me/bfixSoftware"
+CHANNEL_LINK = "https://t.me/+0QKwgEMQwHg2Y2U0"
 
-DB_NAME = "bfix_store.db"
+# 📌 رابط قاعدة بيانات Neon الخاص بك
+DATABASE_URL = "postgresql://neondb_owner:npg_pHWc7KyUokY5@ep-orange-wave-axvshjaq-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 COLOR_PRIMARY = "🔵"
 COLOR_SUCCESS = "🟢"
@@ -58,49 +60,68 @@ COLOR_ACTION = "✨"
  ADMIN_SRV_NAME, ADMIN_SRV_DESC, ADMIN_SRV_PRICE, ADMIN_SRV_DURATION, 
  ADMIN_NEW_PRICE, ADMIN_CARD_CODE, ADMIN_CARD_AMOUNT, ADMIN_STOCK_CHOICE,
  ADMIN_STOCK_KEY, ADMIN_MAINTENANCE_TEXT, WAITING_USER_EMAIL, WAITING_RENTAL_CREDENTIALS,
- ADMIN_MSG_TARGET_ID, ADMIN_MSG_CONTENT, ADMIN_ADD_CH_NAME, ADMIN_ADD_CH_LINK,
- ADMIN_EDIT_BTN_KEY, ADMIN_EDIT_BTN_TEXT, ADMIN_EDIT_BTN_URL) = range(24)
+ ADMIN_MSG_TARGET_ID, ADMIN_MSG_CONTENT) = range(19)
 
-# ================= (2) قاعدة البيانات =================
+# ================= (2) نظام قاعدة البيانات السحابية (PostgreSQL / Neon) =================
 def db_execute(query, params=()):
-    with sqlite3.connect(DB_NAME, timeout=30) as conn:
-        conn.execute(query, params)
+    pg_query = query.replace("?", "%s")
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cursor = conn.cursor()
+    try:
+        cursor.execute(pg_query, params)
         conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+        conn.close()
 
 def db_fetch_one(query, params=()):
-    with sqlite3.connect(DB_NAME, timeout=30) as conn:
-        return conn.execute(query, params).fetchone()
+    pg_query = query.replace("?", "%s")
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cursor = conn.cursor()
+    try:
+        cursor.execute(pg_query, params)
+        result = cursor.fetchone()
+        return result
+    finally:
+        cursor.close()
+        conn.close()
 
 def db_fetch_all(query, params=()):
-    with sqlite3.connect(DB_NAME, timeout=30) as conn:
-        return conn.execute(query, params).fetchall()
+    pg_query = query.replace("?", "%s")
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cursor = conn.cursor()
+    try:
+        cursor.execute(pg_query, params)
+        result = cursor.fetchall()
+        return result
+    finally:
+        cursor.close()
+        conn.close()
 
 def init_db():
-    with sqlite3.connect(DB_NAME, timeout=30) as conn:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, name TEXT, balance REAL DEFAULT 0.0, join_date TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS services (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT, price REAL, duration TEXT, category TEXT DEFAULT 'digital', quantity INTEGER DEFAULT 0, file_id TEXT)''')
-        try: conn.execute("ALTER TABLE services ADD COLUMN file_id TEXT")
-        except: pass
-        conn.execute('''CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, service_id INTEGER, status TEXT, order_date TEXT, custom_data TEXT)''')
-        try: conn.execute("ALTER TABLE orders ADD COLUMN custom_data TEXT")
-        except: pass
-        conn.execute('''CREATE TABLE IF NOT EXISTS cards (code TEXT PRIMARY KEY, amount REAL, is_used INTEGER DEFAULT 0)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS product_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, service_id INTEGER, key_text TEXT, is_sold INTEGER DEFAULT 0)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS maintenance_mode (id INTEGER PRIMARY KEY AUTOINCREMENT, is_active INTEGER DEFAULT 0, custom_message TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS last_broadcast (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT)''')
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, name TEXT, balance REAL DEFAULT 0.0, join_date TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS services (id SERIAL PRIMARY KEY, name TEXT, description TEXT, price REAL, duration TEXT, category TEXT DEFAULT 'digital', quantity INTEGER DEFAULT 0, file_id TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS orders (id SERIAL PRIMARY KEY, user_id BIGINT, service_id INTEGER, status TEXT, order_date TEXT, custom_data TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS cards (code TEXT PRIMARY KEY, amount REAL, is_used INTEGER DEFAULT 0)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS product_keys (id SERIAL PRIMARY KEY, service_id INTEGER, key_text TEXT, is_sold INTEGER DEFAULT 0)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS maintenance_mode (id SERIAL PRIMARY KEY, is_active INTEGER DEFAULT 0, custom_message TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS last_broadcast (id SERIAL PRIMARY KEY, content TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS forced_channels (id SERIAL PRIMARY KEY, name TEXT, link TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS custom_buttons (btn_key TEXT PRIMARY KEY, btn_text TEXT, btn_action TEXT)''')
         
-        # جدول قنوات الاشتراك الإجباري
-        conn.execute('''CREATE TABLE IF NOT EXISTS forced_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, link TEXT)''')
+        conn.commit()
         
-        # جدول تحكم الأزرار
-        conn.execute('''CREATE TABLE IF NOT EXISTS custom_buttons (btn_key TEXT PRIMARY KEY, btn_text TEXT, btn_action TEXT)''')
-        
-        chk_main = conn.execute("SELECT id FROM maintenance_mode WHERE id = 1").fetchone()
-        if not chk_main:
-            conn.execute("INSERT INTO maintenance_mode (id, is_active) VALUES (1, 0)")
+        cursor.execute("SELECT id FROM maintenance_mode WHERE id = 1")
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO maintenance_mode (id, is_active) VALUES (1, 0)")
+            conn.commit()
             
-        # إدراج الأزرار الافتراضية إذا كانت فارغة
         default_btns = [
             ("cat_digital", "⚡ شحن الأدوات والبوكسات 🛠️", "show_cat_digital"),
             ("cat_subscriptions", "🔵 الاشتراكات 🚀", "show_cat_subscriptions"),
@@ -113,10 +134,12 @@ def init_db():
             ("fund_acc", "🔵 تغذية حسابك", "fund_account")
         ]
         for key, text, action in default_btns:
-            conn.execute("INSERT OR IGNORE INTO custom_buttons (btn_key, btn_text, btn_action) VALUES (?, ?, ?)", (key, text, action))
-            
+            cursor.execute("INSERT INTO custom_buttons (btn_key, btn_text, btn_action) VALUES (%s, %s, %s) ON CONFLICT (btn_key) DO NOTHING", (key, text, action))
         conn.commit()
-    print("\n✅ تم الاتصال بقاعدة البيانات بنجاح!")
+    finally:
+        cursor.close()
+        conn.close()
+    print("\n✅ تم الاتصال بقاعدة بيانات Neon السحابية بنجاح!")
 
 def add_user_if_not_exists(user_id, name):
     user = db_fetch_one("SELECT * FROM users WHERE user_id = ?", (user_id,))
@@ -145,13 +168,16 @@ async def check_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def enforce_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id == ADMIN_ID: return True
-    
+    if context.user_data.get('is_subscribed', False): return True
+
     channels = db_fetch_all("SELECT name, link FROM forced_channels")
-    if not channels: return True # إذا لم تكن هناك قنوات مضافة، يمر العميل مباشرة
-    
     keyboard = []
-    for name, link in channels:
-        keyboard.append([InlineKeyboardButton(f"📢 {name}", url=link)])
+    if channels:
+        for name, link in channels:
+            keyboard.append([InlineKeyboardButton(f"📢 {name}", url=link)])
+    else:
+        keyboard.append([InlineKeyboardButton("📢 اشترك في القناة الرسمية 🔔", url=CHANNEL_LINK)])
+        
     keyboard.append([InlineKeyboardButton("✅ تحقق من الاشتراك 🔄", callback_data="check_sub")])
     
     warning_text = (
@@ -174,16 +200,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     add_user_if_not_exists(user.id, user.first_name)
     
-    # جلب الأزرار الديناميكية من قاعدة البيانات
-    b_dig = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'cat_digital'")
-    b_sub = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'cat_subscriptions'")
-    b_ren = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'cat_rentals'")
-    b_vip = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'cat_vip'")
-    b_fre = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'cat_free'")
-    b_ord = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'my_orders'")
-    b_pro = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'my_profile'")
-    b_chg = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'charge_acc'")
-    b_fnd = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = 'fund_acc'")
+    b_dig = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('cat_digital',))
+    b_sub = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('cat_subscriptions',))
+    b_ren = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('cat_rentals',))
+    b_vip = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('cat_vip',))
+    b_fre = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('cat_free',))
+    b_ord = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('my_orders',))
+    b_pro = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('my_profile',))
+    b_chg = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('charge_acc',))
+    b_fnd = db_fetch_one("SELECT btn_text, btn_action FROM custom_buttons WHERE btn_key = ?", ('fund_acc',))
 
     text = (
         "✨ ━━━━━ ❲ 𝐁-𝐅𝐢𝐱 𝐒𝐨𝐟𝐭𝐰𝐚𝐫𝐞 ❳ ━━━━━ ✨\n\n"
@@ -211,11 +236,9 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     data = query.data
 
     if data == "check_sub":
-        if await enforce_subscription(update, context):
-            await query.answer("✅ تم التحقق بنجاح! أهلاً بك.", show_alert=True)
-            await start_command(update, context)
-        else:
-            await query.answer("❌ لم تقم بالاشتراك في جميع القنوات المطلوبة بعد!", show_alert=True)
+        context.user_data['is_subscribed'] = True
+        await query.answer("✅ تم التحقق بنجاح! أهلاً بك في المتجر.", show_alert=True)
+        await start_command(update, context)
         return
 
     if not await check_maintenance(update, context, is_admin=(user_id == ADMIN_ID)): return
@@ -235,8 +258,7 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "fund_account":
         payment_text = (
             "💎 **━━━━━ ❲ بوابات الدفع الإلكتروني المعتمدة ❳ ━━━━━** 💎\n\n"
-            "🌟 أهلاً بك عزيزي العميل. يرجى اختيار وسيلة الدفع المناسبة لك من القائمة أدناه لعرض تفاصيل الحساب المخصص بدقة 👇\n\n"
-            "🔒 **نظام آلي فوري وموثوق 100%**"
+            "🌟 أهلاً بك عزيزي العميل. يرجى اختيار وسيلة الدفع المناسبة لك من القائمة أدناه لعرض تفاصيل الحساب المخصص بدقة 👇"
         )
         payment_keyboard = [
             [InlineKeyboardButton("🔹 محفظة جيب", callback_data="pay_jeep"), InlineKeyboardButton("🔹 جوالي", callback_data="pay_jawali")],
@@ -248,32 +270,21 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.edit_text(payment_text, reply_markup=InlineKeyboardMarkup(payment_keyboard), parse_mode='Markdown')
 
     elif data == "pay_jeep":
-        msg = "💎 **━━━━━ ❲ تفاصيل الدفع – محفظة جيب ❳ ━━━━━** 💎\n\n📱 **رقم الحساب المعتمد:**\n`580300`\n\n⚡ قم بالتحويل وأرسل الإشعار لدعم واتساب لتعبئة رصيدك."
-        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔵 العودة لطرق الدفع", callback_data="fund_account")], [InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
-
+        await query.message.edit_text("💎 **محفظة جيب:**\n`580300`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 الدعم", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔴 رجوع", callback_data="fund_account")]]))
     elif data == "pay_jawali":
-        msg = "💎 **━━━━━ ❲ تفاصيل الدفع – محفظة جوالي ❳ ━━━━━** 💎\n\n📱 **رقم الحساب المعتمد:**\n`777728478`\n\n⚡ قم بالتحويل وأرسل الإشعار لدعم واتساب لتعبئة رصيدك."
-        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔵 العودة لطرق الدفع", callback_data="fund_account")], [InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
-
+        await query.message.edit_text("💎 **محفظة جوالي:**\n`777728478`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 الدعم", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔴 رجوع", callback_data="fund_account")]]))
     elif data == "pay_onecash":
-        msg = "💎 **━━━━━ ❲ تفاصيل الدفع – محفظة وان كاش ❳ ━━━━━** 💎\n\n📱 **رقم الحساب المعتمد:**\n`178109713`\n\n⚡ قم بالتحويل وأرسل الإشعار لدعم واتساب لتعبئة رصيدك."
-        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔵 العودة لطرق الدفع", callback_data="fund_account")], [InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
-
+        await query.message.edit_text("💎 **وان كاش:**\n`178109713`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 الدعم", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔴 رجوع", callback_data="fund_account")]]))
     elif data == "pay_kuraimi":
-        msg = "💎 **━━━━━ ❲ تفاصيل الدفع – بنك الكريمي ❳ ━━━━━** 💎\n\n🇾🇪 **يمني:** `3204168937`\n🇸🇦 **سعودي:** `3204433991`\n💵 **دولار:** `3191718649`\n\n⚡ قم بالتحويل وأرسل السند عبر واتساب."
-        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔵 العودة لطرق الدفع", callback_data="fund_account")], [InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
-
+        await query.message.edit_text("🏦 **الكريمي:**\nيمني: `3204168937`\nسعودي: `3204433991`\nدولار: `3191718649`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 الدعم", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔴 رجوع", callback_data="fund_account")]]))
     elif data == "pay_binance":
-        msg = "💎 **━━━━━ ❲ تفاصيل الدفع – Binance Pay ❳ ━━━━━** 💎\n\n🟡 **Binance ID:**\n`1063050653`"
-        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔵 العودة لطرق الدفع", callback_data="fund_account")], [InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
-
+        await query.message.edit_text("🟡 **Binance ID:**\n`1063050653`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 الدعم", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔴 رجوع", callback_data="fund_account")]]))
     elif data == "pay_visa":
-        msg = "💎 **━━━━━ ❲ تفاصيل الدفع – بطاقة VISA ❳ ━━━━━** 💎\n\n💳 **رقم البطاقة:**\n`4909800019663092`"
-        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔵 العودة لطرق الدفع", callback_data="fund_account")], [InlineKeyboardButton("🔴 القائمة الرئيسية", callback_data="main_menu")]]), parse_mode='Markdown')
+        await query.message.edit_text("💳 **VISA:**\n`4909800019663092`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 الدعم", url=WHATSAPP_LINK)], [InlineKeyboardButton("🔴 رجوع", callback_data="fund_account")]]))
 
     elif data.startswith("show_cat_"):
         category = data.replace("show_cat_", "")
-        if category == "digital": title = "⚡ خدمات شحن الأدوات والبوكسات الفخمة 🛠️"
+        if category == "digital": title = "⚡ خدمات شحن الأدوات والبوكسات 🛠️"
         elif category == "subscriptions": title = "🔵 الاشتراكات الرقمية 🚀"
         elif category == "rentals": title = "🔧 خدمة إيجار الأدوات 🛠️"
         elif category == "vip": title = "💎 عروض VIP الماسي ⭐"
@@ -313,7 +324,6 @@ async def main_buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if cat == "free" or price == 0:
             db_execute("INSERT INTO orders (user_id, service_id, status, order_date) VALUES (?, ?, 'مكتمل ✅ مجاني', ?)", (user_id, srv_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             await query.message.edit_text("🎁 **إليك طلبك المجاني الفوري:**", parse_mode='Markdown')
-            
             if srv[3]:
                 try: await context.bot.send_document(chat_id=user_id, document=srv[3], caption=f"🎁 طلبك المجاني: {srv[1]}")
                 except:
@@ -503,7 +513,7 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ch_text += f"▪️ {ch_name} | [رابط]({ch_link})\n"
                 keyboard.append([InlineKeyboardButton(f"🗑️ حذف: {ch_name}", callback_data=f"delch_{ch_id}")])
         else:
-            ch_text += "لا توجد قنوات مضافة حالياً."
+            ch_text += "لا توجد قنوات مضافة حالياً (سيتم استخدام القناة الافتراضية)."
         keyboard.append([InlineKeyboardButton("🔴 رجوع", callback_data="adm_main")])
         await query.message.edit_text(ch_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown', disable_web_page_preview=True)
     elif data == "adm_add_channel":
@@ -531,8 +541,8 @@ async def admin_menus_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     elif data == "adm_toggle_main":
         current = is_bot_under_maintenance()
-        if current: db_execute("UPDATE maintenance_mode SET is_active = 0 WHERE id = 1", ())
-        else: db_execute("UPDATE maintenance_mode SET is_active = 1 WHERE id = 1", ())
+        if current: db_execute("UPDATE maintenance_mode SET is_active = 0 WHERE id = 1")
+        else: db_execute("UPDATE maintenance_mode SET is_active = 1 WHERE id = 1")
         await admin_panel(update, context)
     elif data == "adm_stats":
         u_count = db_fetch_one("SELECT COUNT(*) FROM users")[0]
@@ -777,7 +787,6 @@ def main():
     
     async def global_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        # استقبال اسم القناة الجديدة للاشتراك الإجباري
         if user.id == ADMIN_ID and context.user_data.get('waiting_ch_name'):
             context.user_data['ch_name_val'] = update.message.text.strip()
             context.user_data['waiting_ch_name'] = False
@@ -785,7 +794,6 @@ def main():
             await update.message.reply_text("🔗 أرسل الآن **رابط الدعوة الخاص** بالقناة:")
             return
             
-        # استقبال رابط القناة الجديدة للاشتراك الإجباري
         if user.id == ADMIN_ID and context.user_data.get('waiting_ch_link'):
             ch_link = update.message.text.strip()
             ch_name = context.user_data.get('ch_name_val')
@@ -794,7 +802,6 @@ def main():
             await update.message.reply_text("✅ تمت إضافة القناة بنجاح لقائمة الاشتراك الإجباري!")
             return
 
-        # استقبال التعديل على أزرار القائمة الرئيسية
         if user.id == ADMIN_ID and context.user_data.get('edit_btn_key'):
             bkey = context.user_data.get('edit_btn_key')
             new_text = update.message.text.strip()
@@ -807,7 +814,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, global_text_router))
 
-    print("\n✅ البوت يعمل بكامل الخصائص والميزات الجديدة بنجاح!")
+    print("\n✅ البوت يعمل بكامل الخصائص ومتصل بقاعدة بيانات Neon السحابية بنجاح!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
@@ -817,3 +824,4 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         print("\nتم إيقاف البوت.")
+
