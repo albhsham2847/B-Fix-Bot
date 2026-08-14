@@ -268,6 +268,48 @@ def init_db():
     for sql in statements:
         db_execute(sql)
 
+    # ترقية غير مدمرة لقواعد البيانات المنشأة بإصدار أقدم.
+    # نضيف الأعمدة التي يعتمد عليها هذا الإصدار فقط؛ لا نحذف صفوفاً أو جداول.
+    migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC(14,2) NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS join_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE categories ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''",
+        "ALTER TABLE categories ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE categories ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS category_key TEXT DEFAULT 'digital'",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS subscription_duration TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS activation_time TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS price NUMERIC(14,2) NOT NULL DEFAULT 0",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS delivery_mode TEXT NOT NULL DEFAULT 'manual'",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS needs_email BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS needs_note BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS needs_phone BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS file_id TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS is_sold BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sold_to BIGINT",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sold_at TIMESTAMP",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS is_used BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS used_by BIGINT",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS used_at TIMESTAMP",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'قيد المراجعة'",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS total NUMERIC(14,2) NOT NULL DEFAULT 0",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_email TEXT DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_note TEXT DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_phone TEXT DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_note TEXT DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_text TEXT DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    ]
+    for sql in migrations:
+        db_execute(sql)
+    log.info("Database schema verified and safely upgraded.")
+
     categories = [
         ("digital", "⚡ الأدوات والبوكسات", "اشتراكات الأدوات والبوكسات التي تحتاج تفعيلًا.", 1),
         ("subscriptions", "🔵 الاشتراكات", "اشتراكات فورية وأكواد مخزون.", 2),
