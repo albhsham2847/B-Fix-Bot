@@ -26,6 +26,7 @@ import os
 import logging
 import asyncio
 import threading
+import re
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
@@ -39,6 +40,7 @@ from telegram import (
     InlineKeyboardMarkup,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -461,14 +463,13 @@ async def allowed(update, context, admin_ok=False):
             "البوت قيد الصيانة حاليًا. يرجى المحاولة لاحقًا.",
         )
         if update.callback_query:
-            await update.callback_query.answer(
-                f"⚙️ {text}", show_alert=True
-            )
+            await update.callback_query.answer(f"⚙️ {text}", show_alert=True)
         elif update.message:
             await update.message.reply_text(f"⚙️ {text}")
         return False
 
-    if get_user(user.id) and get_user(user.id)[3]:
+    record = get_user(user.id)
+    if record and record[3]:
         if update.message:
             await update.message.reply_text("🚫 تم إيقاف حسابك. تواصل مع الإدارة.")
         return False
@@ -476,7 +477,25 @@ async def allowed(update, context, admin_ok=False):
     return True
 
 
-async def subscription_ok(update):
+def valid_chat_id(value):
+    value = (value or "").strip()
+    return bool(re.fullmatch(r"-?\d+|@[A-Za-z0-9_]{5,32}", value))
+
+
+def normalized_chat_id(value):
+    value = (value or "").strip()
+    return int(value) if value.lstrip("-").isdigit() else value
+
+
+def member_is_active(member):
+    status = str(getattr(member, "status", ""))
+    if status in {"member", "administrator", "creator", "owner"}:
+        return True
+    # العضو المقيّد قد يبقى عضواً فعلياً في القناة.
+    return status == "restricted" and bool(getattr(member, "is_member", False))
+
+
+async def subscription_ok(update, context):
     user = update.effective_user
     if not user or is_admin(user.id):
         return True
@@ -489,55 +508,56 @@ async def subscription_ok(update):
         return True
 
     missing = []
-    for cid, name, link, chat_id in channels:
-        if not chat_id:
-            # Without a Telegram chat_id we can still show the channel button,
-            # but cannot truthfully verify membership.
+    misconfigured = []
+    for channel_id, name, link, chat_id in channels:
+        chat_id = (chat_id or "").strip()
+        if not valid_chat_id(chat_id):
+            misconfigured.append(name)
+            log.warning("Forced channel #%s has invalid chat_id: %r", channel_id, chat_id)
             continue
         try:
-            member = await update.get_bot().get_chat_member(chat_id, user.id)
-            status = getattr(member, "status", "")
-            if status not in ("member", "administrator", "creator"):
+            member = await context.bot.get_chat_member(normalized_chat_id(chat_id), user.id)
+            if not member_is_active(member):
                 missing.append((name, link))
-        except Exception:
-            # If verification fails, require the user to use the channel link.
-            missing.append((name, link))
+        except (Forbidden, BadRequest) as exc:
+            # لا نعرض العميل كغير منضم عندما تكون المشكلة في صلاحيات البوت أو chat_id.
+            misconfigured.append(name)
+            log.warning("Cannot verify forced channel #%s (%s): %s", channel_id, name, exc)
+        except TelegramError as exc:
+            misconfigured.append(name)
+            log.warning("Temporary Telegram failure while checking channel #%s: %s", channel_id, exc)
+
+    if misconfigured:
+        text = (
+            "⚙️ **التحقق من الاشتراك متوقف مؤقتًا**\n\n"
+            "تعذر على البوت الوصول إلى إعدادات إحدى القنوات المطلوبة. "
+            "تم إشعار الإدارة لإصلاح الإعداد، ويرجى المحاولة لاحقًا."
+        )
+        if update.callback_query:
+            await update.callback_query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+        elif update.message:
+            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        return False
 
     if not missing:
         return True
 
-    keyboard = [
-        [InlineKeyboardButton(f"📢 {name}", url=link)]
-        for name, link in missing
-    ]
-    keyboard.append(
-        [InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub")]
-    )
-
+    keyboard = [[InlineKeyboardButton(f"📢 {name}", url=link)] for name, link in missing]
+    keyboard.append([InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub")])
     text = (
         "🔒 **الاشتراك مطلوب أولًا**\n\n"
-        "للاستفادة من متجر B-Fix، اشترك في القنوات المطلوبة ثم اضغط "
-        "«تحقق من الاشتراك»."
+        "للاستفادة من متجر B-Fix، اشترك في القنوات المطلوبة ثم اضغط «تحقق من الاشتراك»."
     )
 
     if update.callback_query:
         try:
             await update.callback_query.message.edit_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN,
+                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
             )
-        except Exception:
-            await update.callback_query.answer(
-                "⚠️ اشترك في القنوات المطلوبة أولًا.",
-                show_alert=True,
-            )
+        except TelegramError:
+            await update.callback_query.answer("⚠️ اشترك في القنوات المطلوبة أولًا.", show_alert=True)
     elif update.message:
-        await update.message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     return False
 
 
@@ -611,7 +631,7 @@ async def send_or_edit(update, text, markup=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await allowed(update, context, admin_ok=True):
         return
-    if not await subscription_ok(update):
+    if not await subscription_ok(update, context):
         return
 
     user = update.effective_user
@@ -637,14 +657,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     if data == "check_sub":
-        if await subscription_ok(update):
+        if await subscription_ok(update, context):
             await q.answer("✅ تم التحقق بنجاح.", show_alert=True)
             await start(update, context)
         return
 
     if not await allowed(update, context):
         return
-    if not await subscription_ok(update):
+    if not await subscription_ok(update, context):
         return
 
     user_id = q.from_user.id
@@ -950,7 +970,7 @@ async def payment_methods(update):
     rows = db_execute(
         """
         SELECT key,title FROM payment_methods
-        WHERE active=TRUE ORDER BY sort_order,id
+        WHERE active=TRUE ORDER BY sort_order,key
         """,
         fetchall=True,
     )
@@ -1443,7 +1463,9 @@ async def admin_callback(update, context):
 
     data = q.data[4:]
 
-    if data == "services":
+    if data == "home":
+        await admin_panel(update, context)
+    elif data == "services":
         await admin_services(update)
     elif data == "service_menu":
         await admin_service_menu(update)
@@ -1466,6 +1488,8 @@ async def admin_callback(update, context):
         await q.message.edit_text("🎟️ أرسل كود البطاقة الجديدة:")
     elif data == "channels":
         await admin_channels(update)
+    elif data == "test_channels":
+        await admin_test_channels(update, context)
     elif data == "add_channel":
         context.user_data["admin_state"] = "channel_name"
         await q.message.edit_text(
@@ -1492,8 +1516,8 @@ async def admin_callback(update, context):
         await admin_logs(update)
     elif data.startswith("delete_service:"):
         sid = int(data.split(":")[1])
-        db_execute("DELETE FROM services WHERE id=%s", (sid,))
-        await q.answer("✅ تم حذف الخدمة.", show_alert=True)
+        db_execute("UPDATE services SET active=FALSE WHERE id=%s", (sid,))
+        await q.answer("✅ تمت أرشفة الخدمة مع الاحتفاظ بالمخزون والطلبات.", show_alert=True)
         await admin_services(update)
     elif data.startswith("delete_channel:"):
         cid = int(data.split(":")[1])
@@ -1690,7 +1714,10 @@ async def admin_channels(update):
         fetchall=True,
     )
     text = "📢 **قنوات الاشتراك الإجباري**\n\n"
-    keyboard = [[InlineKeyboardButton("➕ إضافة قناة", callback_data="adm:add_channel")]]
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة قناة", callback_data="adm:add_channel")],
+        [InlineKeyboardButton("🔍 اختبار إعداد القنوات", callback_data="adm:test_channels")],
+    ]
     for cid, name, link, chat_id, active in rows:
         text += f"▪️ {name} — {'🟢' if active else '🔴'}\n"
         text += f"   chat_id: {chat_id or 'غير مضبوط'}\n"
@@ -1701,6 +1728,47 @@ async def admin_channels(update):
         text += "لا توجد قنوات."
     keyboard.append([InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")])
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
+
+
+async def admin_test_channels(update, context):
+    rows = db_execute(
+        "SELECT id,name,chat_id,active FROM forced_channels WHERE active=TRUE ORDER BY id",
+        fetchall=True,
+    )
+    if not rows:
+        await send_or_edit(
+            update,
+            "📢 لا توجد قنوات مفعلة للاشتراك الإجباري.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔴 القنوات", callback_data="adm:channels")]]),
+        )
+        return
+
+    results = []
+    for channel_id, name, chat_id, active in rows:
+        chat_id = (chat_id or "").strip()
+        if not valid_chat_id(chat_id):
+            results.append(f"🔴 {name}: chat_id غير صالح أو غير مضاف")
+            continue
+        try:
+            bot_member = await context.bot.get_chat_member(normalized_chat_id(chat_id), context.bot.id)
+            if member_is_active(bot_member):
+                results.append(f"🟢 {name}: البوت يستطيع الوصول إلى القناة")
+            else:
+                results.append(f"🔴 {name}: أضف البوت مشرفًا في القناة")
+        except (Forbidden, BadRequest) as exc:
+            results.append(f"🔴 {name}: لا يمكن الوصول؛ راجع chat_id وأضف البوت مشرفًا")
+            log.warning("Forced-channel test failed for %s: %s", channel_id, exc)
+        except TelegramError as exc:
+            results.append(f"🟡 {name}: تعذر الاختبار مؤقتًا؛ حاول لاحقًا")
+            log.warning("Forced-channel test temporarily failed for %s: %s", channel_id, exc)
+
+    text = "🔍 **فحص قنوات الاشتراك**\n\n" + "\n".join(results)
+    text += "\n\nإذا ظهرت 🔴، تأكد من أن البوت مشرف في القناة وأن chat_id يبدأ عادةً بـ `-100`."
+    await send_or_edit(
+        update,
+        text,
+        InlineKeyboardMarkup([[InlineKeyboardButton("🔴 القنوات", callback_data="adm:channels")]]),
+    )
 
 
 async def admin_buttons(update):
@@ -1889,31 +1957,34 @@ async def admin_finish_delivery(update, context, oid):
 
 
 async def admin_cancel_order(update, context, oid):
-    row = db_execute(
-        "SELECT user_id,total,status FROM orders WHERE id=%s",
-        (oid,),
-        fetch=True,
-    )
-    if not row:
-        return
-    if str(row[2]).startswith("مكتمل"):
-        await update.callback_query.answer("لا يمكن إلغاء طلب مكتمل.", show_alert=True)
-        return
-
+    # نقفل الطلب أولاً؛ بهذه الطريقة لا يمكن لزرتين متتاليتين إعادة الرصيد مرتين.
     conn = DB_POOL.getconn()
+    cancelled = None
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id,total,status FROM orders WHERE id=%s FOR UPDATE",
+                (oid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                await update.callback_query.answer("الطلب غير موجود.", show_alert=True)
+                return
+            if str(row[2]).startswith("مكتمل") or str(row[2]).startswith("ملغي"):
+                conn.rollback()
+                await update.callback_query.answer("لا يمكن إلغاء هذا الطلب أو إعادة رصيده مرة أخرى.", show_alert=True)
+                return
+
             cur.execute(
                 "UPDATE users SET balance=balance+%s WHERE user_id=%s",
                 (row[1], row[0]),
             )
             cur.execute(
-                """
-                UPDATE orders SET status='ملغي ❌',updated_at=CURRENT_TIMESTAMP
-                WHERE id=%s
-                """,
+                "UPDATE orders SET status='ملغي ❌',updated_at=CURRENT_TIMESTAMP WHERE id=%s",
                 (oid,),
             )
+            cancelled = row
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1922,12 +1993,13 @@ async def admin_cancel_order(update, context, oid):
         DB_POOL.putconn(conn)
 
     await context.bot.send_message(
-        row[0],
+        cancelled[0],
         f"⚠️ **تم إلغاء طلبك #{oid}**\n\n"
-        f"💰 تمت إعادة مبلغ **{money(row[1])}$** إلى رصيدك.",
+        f"💰 تمت إعادة مبلغ **{money(cancelled[1])}$** إلى رصيدك.",
         parse_mode=ParseMode.MARKDOWN,
     )
-    await update.callback_query.answer("✅ تم الإلغاء وإعادة الرصيد.", show_alert=True)
+    log_operation(cancelled[0], "order_cancelled", f"order={oid};refund={cancelled[1]}", ADMIN_ID)
+    await update.callback_query.answer("✅ تم الإلغاء وإعادة الرصيد مرة واحدة.", show_alert=True)
     await admin_order_page(update, oid)
 
 
