@@ -65,14 +65,22 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
+# روابط موحدة: استخدمها في جميع أزرار الدعم والتواصل ولا تكرر الروابط داخل الواجهات.
 WHATSAPP_LINK = os.getenv(
     "WHATSAPP_LINK",
-    "https://iwtsp.com/967777728478",
+    "https://wa.me/967777728478",
 ).strip()
-SUPPORT_LINK = os.getenv(
-    "SUPPORT_LINK",
+ADMIN_CONTACT_LINK = os.getenv(
+    "ADMIN_CONTACT_LINK",
     "https://t.me/bfixSoftware",
 ).strip()
+SUPPORT_LINK = os.getenv("SUPPORT_LINK", ADMIN_CONTACT_LINK).strip()
+FORCED_CHANNEL_LINK = os.getenv(
+    "FORCED_CHANNEL_LINK",
+    "https://t.me/+0QKwgEMQwHg2Y2U0",
+).strip()
+# ضع chat_id للقناة في Render فقط لتفعيل تحقق الاشتراك الحقيقي؛ رابط دعوة وحده لا يكفي للتحقق.
+FORCED_CHANNEL_CHAT_ID = os.getenv("FORCED_CHANNEL_CHAT_ID", "").strip()
 BOT_NAME = os.getenv("BOT_NAME", "𝐁-𝐅𝐢𝐱 𝐒𝐨𝐟𝐭𝐰𝐚𝐫𝐞")
 
 if not BOT_TOKEN:
@@ -265,6 +273,24 @@ def init_db():
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS topup_receipts (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
+            payment_key TEXT NOT NULL,
+            payment_title TEXT NOT NULL,
+            receipt_number TEXT DEFAULT '',
+            photo_file_id TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'قيد المراجعة ⏳',
+            requested_amount NUMERIC(14,2),
+            approved_amount NUMERIC(14,2),
+            admin_note TEXT DEFAULT '',
+            reviewed_by BIGINT,
+            reviewed_at TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
     ]
 
     for sql in statements:
@@ -292,6 +318,10 @@ def init_db():
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS file_id TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
+        "UPDATE services SET active=TRUE WHERE active IS NULL",
+        "ALTER TABLE services ALTER COLUMN active SET DEFAULT TRUE",
+        "UPDATE categories SET active=TRUE WHERE active IS NULL",
+        "ALTER TABLE categories ALTER COLUMN active SET DEFAULT TRUE",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS is_sold BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sold_to BIGINT",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sold_at TIMESTAMP",
@@ -307,6 +337,15 @@ def init_db():
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_text TEXT DEFAULT ''",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS receipt_number TEXT DEFAULT ''",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS photo_file_id TEXT DEFAULT ''",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'قيد المراجعة ⏳'",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS requested_amount NUMERIC(14,2)",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS approved_amount NUMERIC(14,2)",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS admin_note TEXT DEFAULT ''",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS reviewed_by BIGINT",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP",
+        "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
     ]
     for sql in migrations:
         db_execute(sql)
@@ -364,6 +403,20 @@ def init_db():
             row,
         )
 
+    # لا يتم إدراج قناة الاشتراك تلقائياً إلا عند تزويد chat_id صالح؛
+    # رابط الدعوة وحده لا يمكن لـ Telegram استخدامه للتحقق من العضوية.
+    if valid_chat_id(FORCED_CHANNEL_CHAT_ID):
+        exists = db_execute(
+            "SELECT id FROM forced_channels WHERE chat_id=%s LIMIT 1",
+            (FORCED_CHANNEL_CHAT_ID,),
+            fetch=True,
+        )
+        if not exists:
+            db_execute(
+                "INSERT INTO forced_channels(name,link,chat_id) VALUES(%s,%s,%s)",
+                ("📢 قناة B-Fix", FORCED_CHANNEL_LINK, FORCED_CHANNEL_CHAT_ID),
+            )
+
     # Payment methods from the previous bot.
     payments = [
         ("jeep", "🔹 محفظة جيب", "📱 رقم الحساب المعتمد:\n580300\n\nقم بالتحويل ثم أرسل السند للدعم عبر واتساب."),
@@ -394,6 +447,21 @@ def now():
 
 def money(value):
     return f"{Decimal(str(value)):.2f}"
+
+
+AUTO_MAINTENANCE_MESSAGE = (
+    "نعتذر، المتجر تحت الصيانة حاليًا لتحسين الخدمة. "
+    "يرجى المحاولة لاحقًا، وشكرًا لتفهمك."
+)
+
+
+def green_button(text, callback_data=None, url=None):
+    kwargs = {"api_kwargs": {"style": "bg_success"}}
+    if callback_data is not None:
+        kwargs["callback_data"] = callback_data
+    if url is not None:
+        kwargs["url"] = url
+    return InlineKeyboardButton(text, **kwargs)
 
 
 def add_user(user):
@@ -543,7 +611,7 @@ async def subscription_ok(update, context):
         return True
 
     keyboard = [[InlineKeyboardButton(f"📢 {name}", url=link)] for name, link in missing]
-    keyboard.append([InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub")])
+    keyboard.append([green_button("✅ تحقق من الاشتراك", callback_data="check_sub")])
     text = (
         "🔒 **الاشتراك مطلوب أولًا**\n\n"
         "للاستفادة من متجر B-Fix، اشترك في القنوات المطلوبة ثم اضغط «تحقق من الاشتراك»."
@@ -573,28 +641,27 @@ def button_text(key, fallback):
 def main_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(button_text("cat_digital", "⚡ الأدوات والبوكسات"), callback_data="cat:digital"),
-            InlineKeyboardButton(button_text("cat_subscriptions", "🔵 الاشتراكات"), callback_data="cat:subscriptions"),
+            green_button(button_text("cat_digital", "⚡ الأدوات والبوكسات"), callback_data="cat:digital"),
+            green_button(button_text("cat_subscriptions", "🔵 الاشتراكات"), callback_data="cat:subscriptions"),
         ],
+        [green_button(button_text("cat_rentals", "🔧 إيجار الأدوات والبوكسات"), callback_data="cat:rentals")],
         [
-            InlineKeyboardButton(button_text("cat_rentals", "🔧 إيجار الأدوات والبوكسات"), callback_data="cat:rentals"),
-        ],
-        [
-            InlineKeyboardButton(button_text("cat_vip", "💎 عروض VIP"), callback_data="cat:vip"),
-            InlineKeyboardButton(button_text("cat_free", "🎁 عروض مجانية"), callback_data="cat:free"),
+            green_button(button_text("cat_vip", "💎 عروض VIP"), callback_data="cat:vip"),
+            green_button(button_text("cat_free", "🎁 عروض مجانية"), callback_data="cat:free"),
         ],
         [
             InlineKeyboardButton(button_text("my_orders", "📦 طلباتي"), callback_data="orders"),
             InlineKeyboardButton(button_text("my_profile", "👤 حسابي"), callback_data="profile"),
         ],
         [
-            InlineKeyboardButton(button_text("fund_account", "💰 تغذية حسابك"), callback_data="fund"),
+            green_button(button_text("fund_account", "💰 تغذية حسابك"), callback_data="fund"),
             InlineKeyboardButton(button_text("support", "🆘 الدعم"), callback_data="support"),
         ],
         [
+            InlineKeyboardButton("📢 قناة البوت", url=FORCED_CHANNEL_LINK),
             InlineKeyboardButton("🌐 واتساب", url=WHATSAPP_LINK),
-            InlineKeyboardButton("🛠️ قناة/دعم تيليجرام", url=SUPPORT_LINK),
         ],
+        [InlineKeyboardButton("🛠️ تواصل الإدارة", url=ADMIN_CONTACT_LINK)],
         [InlineKeyboardButton("ℹ️ عن المتجر", callback_data="about")],
     ])
 
@@ -705,6 +772,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await payment_detail(update, data.split(":")[1])
         return
 
+    if data.startswith("receipt_start:"):
+        await receipt_start(update, context, data.split(":", 1)[1])
+        return
+
     if data == "support":
         await support_page(update)
         return
@@ -763,7 +834,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_category(update, category):
     cat = db_execute(
-        "SELECT title,description FROM categories WHERE key=%s AND active=TRUE",
+        "SELECT title,description FROM categories WHERE LOWER(TRIM(key))=%s AND COALESCE(active,TRUE)=TRUE",
         (category,),
         fetch=True,
     )
@@ -779,7 +850,8 @@ async def show_category(update, category):
         """
         SELECT id,name,price,delivery_mode,needs_email,needs_phone
         FROM services
-        WHERE category_key=%s AND active=TRUE
+        WHERE LOWER(TRIM(COALESCE(category_key,'')))=%s
+          AND COALESCE(active,TRUE)=TRUE
         ORDER BY id DESC
         """,
         (category,),
@@ -826,7 +898,7 @@ async def show_service(update, sid):
         SELECT id,category_key,name,description,subscription_duration,
                activation_time,price,delivery_mode,needs_email,needs_note,
                needs_phone
-        FROM services WHERE id=%s AND active=TRUE
+        FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
         """,
         (sid,),
         fetch=True,
@@ -868,7 +940,7 @@ async def show_service(update, sid):
         )
 
     keyboard = [
-        [InlineKeyboardButton("🟢 طلب الخدمة الآن", callback_data=f"buy:{sid}")],
+        [green_button("🟢 طلب الخدمة الآن", callback_data=f"buy:{sid}")],
         [InlineKeyboardButton("🔴 رجوع للقسم", callback_data=f"cat:{srv[1]}")],
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
@@ -1001,16 +1073,113 @@ async def payment_detail(update, key):
         await update.callback_query.answer("❌ طريقة الدفع غير متاحة.", show_alert=True)
         return
 
-    text = f"💳 **{row[0]}**\n\n{row[1]}\n\n⚡ بعد التحويل أرسل الإثبات للدعم."
+    text = (
+        f"💳 **{row[0]}**\n\n{row[1]}\n\n"
+        "بعد التحويل اضغط الزر أدناه لإرسال رقم السند أو صورة التحويل مباشرة إلى الإدارة."
+    )
     await send_or_edit(
         update,
         text,
         InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟢 مراسلة الدعم عبر واتساب", url=WHATSAPP_LINK)],
+            [green_button("📤 إرسال سند التحويل", callback_data=f"receipt_start:{key}")],
             [InlineKeyboardButton("🔵 طرق الدفع", callback_data="fund")],
             [InlineKeyboardButton("🔴 الرئيسية", callback_data="main")],
         ]),
     )
+
+
+async def receipt_start(update, context, payment_key):
+    row = db_execute(
+        "SELECT key,title FROM payment_methods WHERE key=%s AND active=TRUE",
+        (payment_key,),
+        fetch=True,
+    )
+    if not row:
+        await update.callback_query.answer("❌ طريقة الدفع غير متاحة.", show_alert=True)
+        return
+
+    context.user_data.clear()
+    context.user_data["waiting_topup_receipt"] = True
+    context.user_data["topup_payment_key"] = row[0]
+    context.user_data["topup_payment_title"] = row[1]
+    await update.callback_query.message.edit_text(
+        f"📤 **إرسال سند تحويل — {row[1]}**\n\n"
+        "أرسل الآن **رقم سند التحويل** كنص، أو أرسل **صورة السند** مباشرة.\n\n"
+        "يمكنك كتابة مبلغ التحويل في نص الرسالة أو في وصف الصورة لتسهيل مراجعة الإدارة.\n\n"
+        "⚠️ لا ترسل كلمة المرور أو رموز التحقق أو أي معلومات بطاقتك السرية.\n\n"
+        "أرسل /cancel للإلغاء.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def submit_topup_receipt(update, context, receipt_number="", photo_file_id=""):
+    user = update.effective_user
+    add_user(user)
+    payment_key = context.user_data.get("topup_payment_key")
+    payment_title = context.user_data.get("topup_payment_title")
+    if not payment_key or not payment_title:
+        await update.message.reply_text("❌ انتهت جلسة إرسال السند. اختر طريقة الدفع مجددًا.")
+        context.user_data.clear()
+        return
+
+    row = db_execute(
+        """
+        INSERT INTO topup_receipts(user_id,payment_key,payment_title,receipt_number,photo_file_id)
+        VALUES(%s,%s,%s,%s,%s)
+        RETURNING id
+        """,
+        (user.id, payment_key, payment_title, receipt_number[:500], photo_file_id),
+        fetch=True,
+    )
+    receipt_id = row[0]
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        f"✅ **تم إرسال سند التحويل للإدارة بنجاح**\n\n"
+        f"🧾 رقم المراجعة: **#{receipt_id}**\n"
+        f"💳 وسيلة الدفع: {payment_title}\n\n"
+        "سيتم مراجعة طلبك والتأكد من صحة التحويل. عند قبول السند سيتم شحن حسابك تلقائيًا، "
+        "وسيصلك إشعار بالقبول أو الرفض.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    admin_text = (
+        f"💰 **سند تحويل جديد #{receipt_id}**\n\n"
+        f"👤 العميل: {user.full_name}\n"
+        f"🆔 `{user.id}`\n"
+        f"🔗 @{user.username or '—'}\n"
+        f"💳 الوسيلة: {payment_title}\n"
+        f"🧾 رقم السند/الوصف: {receipt_number or 'صورة سند فقط'}\n\n"
+        "راجعه ثم حدّد مبلغ الشحن عند الموافقة."
+    )
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ قبول وشحن الرصيد", callback_data=f"adm:approve_topup:{receipt_id}")],
+        [InlineKeyboardButton("❌ رفض السند", callback_data=f"adm:reject_topup:{receipt_id}")],
+        [InlineKeyboardButton("📄 تفاصيل السند", callback_data=f"adm:topup:{receipt_id}")],
+    ])
+    if photo_file_id:
+        await context.bot.send_photo(
+            ADMIN_ID,
+            photo_file_id,
+            caption=admin_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=markup,
+        )
+    else:
+        await context.bot.send_message(
+            ADMIN_ID, admin_text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup
+        )
+    log_operation(user.id, "topup_receipt_submitted", f"receipt={receipt_id};payment={payment_key}")
+
+
+async def receipt_photo_handler(update, context):
+    if not context.user_data.get("waiting_topup_receipt"):
+        return
+    if not await allowed(update, context):
+        return
+    photo_file_id = update.message.photo[-1].file_id
+    caption = (update.message.caption or "").strip()
+    await submit_topup_receipt(update, context, receipt_number=caption, photo_file_id=photo_file_id)
 
 
 async def support_page(update):
@@ -1041,7 +1210,7 @@ async def begin_order(update, context, sid):
         SELECT id,category_key,name,description,subscription_duration,
                activation_time,price,delivery_mode,needs_email,needs_note,
                needs_phone,file_id
-        FROM services WHERE id=%s AND active=TRUE
+        FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
         """,
         (sid,),
         fetch=True,
@@ -1311,6 +1480,14 @@ async def customer_text(update, context):
         return
 
     # Card top-up.
+    if context.user_data.get("waiting_topup_receipt"):
+        receipt_number = update.message.text.strip()
+        if not receipt_number:
+            await update.message.reply_text("❌ أرسل رقم السند أو صورة التحويل.")
+            return
+        await submit_topup_receipt(update, context, receipt_number=receipt_number)
+        return
+
     if context.user_data.get("waiting_card"):
         code = update.message.text.strip()
         row = db_execute(
@@ -1445,6 +1622,9 @@ async def admin_panel(update, context):
         ],
         [
             InlineKeyboardButton("💳 طرق الدفع", callback_data="adm:payments"),
+            InlineKeyboardButton("🧾 سندات التحويل", callback_data="adm:topups"),
+        ],
+        [
             InlineKeyboardButton("📣 إشعار جماعي", callback_data="adm:broadcast"),
         ],
         [
@@ -1471,6 +1651,17 @@ async def admin_callback(update, context):
         await admin_service_menu(update)
     elif data == "add_service":
         await admin_add_service_prompt(update, context)
+    elif data.startswith("newservice_category:"):
+        category = data.split(":", 1)[1]
+        if category not in {"digital", "subscriptions", "rentals", "vip", "free"}:
+            await q.answer("❌ قسم غير صحيح.", show_alert=True)
+            return
+        context.user_data["service_category"] = category
+        context.user_data["admin_state"] = "service_name"
+        await q.message.edit_text(
+            "🛒 أرسل **اسم الخدمة** الآن.\n\nمثال: TSM Tool",
+            parse_mode=ParseMode.MARKDOWN,
+        )
     elif data == "stats":
         await admin_stats(update)
     elif data == "orders":
@@ -1504,7 +1695,41 @@ async def admin_callback(update, context):
         await q.message.edit_text("✏️ أرسل النص الجديد للزر:")
     elif data == "payments":
         await admin_payments(update)
+    elif data == "topups":
+        await admin_topup_receipts(update)
+    elif data.startswith("topup:"):
+        await admin_topup_page(update, context, int(data.split(":")[1]))
+    elif data.startswith("approve_topup:"):
+        rid = int(data.split(":")[1])
+        context.user_data["admin_state"] = "topup_approve_amount"
+        context.user_data["topup_receipt_id"] = rid
+        await q.message.reply_text(
+            f"✅ أرسل مبلغ الشحن لسند التحويل #{rid}.\n\n"
+            "سيُضاف هذا المبلغ إلى رصيد العميل عند التأكيد. أرسل /cancel للإلغاء."
+        )
+    elif data.startswith("reject_topup:"):
+        rid = int(data.split(":")[1])
+        context.user_data["admin_state"] = "topup_reject_note"
+        context.user_data["topup_receipt_id"] = rid
+        await q.message.reply_text(
+            f"❌ أرسل سبب رفض سند التحويل #{rid}، أو اكتب: بدون ملاحظة"
+        )
     elif data == "maintenance":
+        await admin_maintenance(update)
+    elif data == "maintenance_auto":
+        set_setting("maintenance_message", AUTO_MAINTENANCE_MESSAGE)
+        set_setting("maintenance", "1")
+        await q.answer("✅ تم تشغيل الصيانة بالرسالة التلقائية.", show_alert=True)
+        await admin_maintenance(update)
+    elif data == "maintenance_custom":
+        context.user_data["admin_state"] = "maintenance_custom_message"
+        await q.message.reply_text(
+            "✍️ أرسل رسالة الصيانة الخاصة التي ستظهر للعملاء.\n\n"
+            "أرسل /cancel للإلغاء."
+        )
+    elif data == "maintenance_off":
+        set_setting("maintenance", "0")
+        await q.answer("✅ تم إيقاف وضع الصيانة.", show_alert=True)
         await admin_maintenance(update)
     elif data == "toggle_maintenance":
         set_setting("maintenance", "0" if maintenance_active() else "1")
@@ -1552,7 +1777,7 @@ async def admin_services(update):
     )
     text = "📦 **إدارة الخدمات**\n\n"
     keyboard = [
-        [InlineKeyboardButton("➕ إضافة خدمة", callback_data="adm:add_service")]
+        [green_button("➕ إضافة خدمة", callback_data="adm:add_service")]
     ]
     if not rows:
         text += "لا توجد خدمات."
@@ -1578,11 +1803,20 @@ async def admin_service_menu(update):
 
 
 async def admin_add_service_prompt(update, context):
-    context.user_data["admin_state"] = "service_name"
+    context.user_data.clear()
+    context.user_data["admin_state"] = "service_category_button"
     await update.callback_query.message.edit_text(
         "➕ **إضافة خدمة جديدة**\n\n"
-        "أرسل اسم الخدمة.\n"
-        "مثال: TSM Tool"
+        "اختر القسم أولًا من الأزرار التالية:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [green_button("⚡ الأدوات والبوكسات", callback_data="adm:newservice_category:digital")],
+            [green_button("🔵 الاشتراكات", callback_data="adm:newservice_category:subscriptions")],
+            [green_button("🔧 إيجار الأدوات", callback_data="adm:newservice_category:rentals")],
+            [green_button("💎 عروض VIP", callback_data="adm:newservice_category:vip")],
+            [green_button("🎁 عروض مجانية", callback_data="adm:newservice_category:free")],
+            [InlineKeyboardButton("🔴 إلغاء", callback_data="adm:services")],
+        ]),
     )
 
 
@@ -1708,6 +1942,140 @@ async def admin_cards(update):
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
+async def admin_topup_receipts(update):
+    rows = db_execute(
+        """
+        SELECT r.id,u.name,r.payment_title,r.status,r.receipt_number,r.created_at
+        FROM topup_receipts r
+        LEFT JOIN users u ON u.user_id=r.user_id
+        ORDER BY r.id DESC LIMIT 30
+        """,
+        fetchall=True,
+    )
+    text = "🧾 **آخر سندات التحويل**\n\n"
+    keyboard = []
+    for rid, name, payment_title, status, receipt_number, created_at in rows:
+        text += f"#{rid} — {name or 'عميل'} — {payment_title}\n{status}\n\n"
+        keyboard.append([InlineKeyboardButton(f"📄 فتح السند #{rid}", callback_data=f"adm:topup:{rid}")])
+    if not rows:
+        text += "لا توجد سندات تحويل حتى الآن."
+    keyboard.append([InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")])
+    await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
+
+
+async def admin_topup_page(update, context, receipt_id):
+    row = db_execute(
+        """
+        SELECT r.id,r.user_id,u.name,u.username,r.payment_title,r.receipt_number,
+               r.photo_file_id,r.status,r.requested_amount,r.approved_amount,
+               r.admin_note,r.created_at
+        FROM topup_receipts r
+        LEFT JOIN users u ON u.user_id=r.user_id
+        WHERE r.id=%s
+        """,
+        (receipt_id,),
+        fetch=True,
+    )
+    if not row:
+        await update.callback_query.answer("❌ السند غير موجود.", show_alert=True)
+        return
+
+    text = (
+        f"🧾 **سند التحويل #{row[0]}**\n\n"
+        f"👤 العميل: {row[2] or '—'}\n"
+        f"🆔 `{row[1]}`\n"
+        f"🔗 @{row[3] or '—'}\n"
+        f"💳 الوسيلة: {row[4]}\n"
+        f"🔢 رقم السند/الوصف: {row[5] or '—'}\n"
+        f"📌 الحالة: {row[7]}\n"
+        f"💵 مبلغ العميل: {money(row[8]) if row[8] is not None else 'غير محدد'}$\n"
+        f"💰 مبلغ الشحن المعتمد: {money(row[9]) if row[9] is not None else '—'}$\n"
+        f"📝 ملاحظة الإدارة: {row[10] or '—'}\n"
+        f"⏰ أُرسل: {row[11]}"
+    )
+    keyboard = []
+    if str(row[7]).startswith("قيد المراجعة"):
+        keyboard.extend([
+            [InlineKeyboardButton("✅ قبول وشحن الرصيد", callback_data=f"adm:approve_topup:{receipt_id}")],
+            [InlineKeyboardButton("❌ رفض السند", callback_data=f"adm:reject_topup:{receipt_id}")],
+        ])
+    keyboard.append([InlineKeyboardButton("🧾 كل السندات", callback_data="adm:topups")])
+    await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
+    if row[6]:
+        await context.bot.send_photo(ADMIN_ID, row[6], caption=f"صورة سند التحويل #{receipt_id}")
+
+
+async def approve_topup_receipt(context, receipt_id, amount):
+    conn = DB_POOL.getconn()
+    approved = None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id,payment_title,status FROM topup_receipts
+                WHERE id=%s FOR UPDATE
+                """,
+                (receipt_id,),
+            )
+            row = cur.fetchone()
+            if not row or not str(row[2]).startswith("قيد المراجعة"):
+                conn.rollback()
+                return None
+            cur.execute(
+                "UPDATE users SET balance=balance+%s WHERE user_id=%s",
+                (amount, row[0]),
+            )
+            cur.execute(
+                """
+                UPDATE topup_receipts
+                SET status='مقبول ✅',approved_amount=%s,reviewed_by=%s,
+                    reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s
+                """,
+                (amount, ADMIN_ID, receipt_id),
+            )
+            approved = (row[0], row[1])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        DB_POOL.putconn(conn)
+    return approved
+
+
+async def reject_topup_receipt(context, receipt_id, note):
+    conn = DB_POOL.getconn()
+    rejected_user_id = None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id,status FROM topup_receipts WHERE id=%s FOR UPDATE",
+                (receipt_id,),
+            )
+            row = cur.fetchone()
+            if not row or not str(row[1]).startswith("قيد المراجعة"):
+                conn.rollback()
+                return None
+            cur.execute(
+                """
+                UPDATE topup_receipts
+                SET status='مرفوض ❌',admin_note=%s,reviewed_by=%s,
+                    reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s
+                """,
+                (note, ADMIN_ID, receipt_id),
+            )
+            rejected_user_id = row[0]
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        DB_POOL.putconn(conn)
+    return rejected_user_id
+
+
 async def admin_channels(update):
     rows = db_execute(
         "SELECT id,name,link,chat_id,active FROM forced_channels ORDER BY id",
@@ -1808,16 +2176,20 @@ async def admin_payments(update):
 
 async def admin_maintenance(update):
     status = "🟢 مفعل" if maintenance_active() else "🔴 معطل"
+    current_message = get_setting("maintenance_message", AUTO_MAINTENANCE_MESSAGE)
     text = (
         "⚙️ **وضع الصيانة**\n\n"
         f"الحالة الحالية: {status}\n\n"
-        "عند التفعيل، يستطيع المشرف استخدام البوت بينما تظهر رسالة الصيانة للعملاء."
+        f"📝 الرسالة الحالية:\n{current_message}\n\n"
+        "اختر رسالة تلقائية أو اكتب رسالة خاصة، ثم يتم تفعيل الصيانة."
     )
     await send_or_edit(
         update,
         text,
         InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 تغيير الحالة", callback_data="adm:toggle_maintenance")],
+            [green_button("⚡ تشغيل برسالة تلقائية", callback_data="adm:maintenance_auto")],
+            [green_button("✍️ تشغيل برسالة خاصة", callback_data="adm:maintenance_custom")],
+            [InlineKeyboardButton("⛔ إيقاف وضع الصيانة", callback_data="adm:maintenance_off")],
             [InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")],
         ]),
     )
@@ -2024,24 +2396,84 @@ async def admin_text(update, context):
     state = context.user_data.get("admin_state")
     text = update.message.text.strip()
 
+    if state == "maintenance_custom_message":
+        if not text:
+            await update.message.reply_text("❌ رسالة الصيانة لا يمكن أن تكون فارغة.")
+            return
+        set_setting("maintenance_message", text[:1500])
+        set_setting("maintenance", "1")
+        context.user_data.clear()
+        await update.message.reply_text("✅ تم تشغيل وضع الصيانة برسالتك الخاصة.")
+        return
+
+    if state == "topup_approve_amount":
+        try:
+            amount = Decimal(text)
+            if amount <= 0:
+                raise InvalidOperation
+        except Exception:
+            await update.message.reply_text("❌ أرسل مبلغ شحن رقميًا أكبر من صفر.")
+            return
+        receipt_id = context.user_data.get("topup_receipt_id")
+        approved = await approve_topup_receipt(context, receipt_id, amount)
+        if not approved:
+            context.user_data.clear()
+            await update.message.reply_text("⚠️ لا يمكن اعتماد هذا السند؛ قد يكون عولج مسبقًا.")
+            return
+        user_id, payment_title = approved
+        balance = get_user(user_id)[2]
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"🎉 **تم قبول سند التحويل #{receipt_id}**\n\n"
+                f"💳 وسيلة الدفع: {payment_title}\n"
+                f"💰 تم شحن: **{money(amount)}$**\n"
+                f"💵 رصيدك الجديد: **{money(balance)}$**\n\n"
+                "شكرًا لاستخدامك متجر B-Fix.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except TelegramError as exc:
+            log.warning("Top-up approval notification failed for user %s: %s", user_id, exc)
+        log_operation(user_id, "topup_approved", f"receipt={receipt_id};amount={money(amount)}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text(f"✅ تم قبول السند #{receipt_id} وشحن {money(amount)}$ للعميل.")
+        return
+
+    if state == "topup_reject_note":
+        receipt_id = context.user_data.get("topup_receipt_id")
+        note = "" if text == "بدون ملاحظة" else text[:1000]
+        user_id = await reject_topup_receipt(context, receipt_id, note)
+        if not user_id:
+            context.user_data.clear()
+            await update.message.reply_text("⚠️ لا يمكن رفض هذا السند؛ قد يكون عولج مسبقًا.")
+            return
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"❌ **تم رفض سند التحويل #{receipt_id}**\n\n"
+                f"📝 السبب: {note or 'لم تُضف الإدارة ملاحظة.'}\n\n"
+                "يمكنك مراجعة بيانات التحويل أو التواصل مع الدعم عند الحاجة.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except TelegramError as exc:
+            log.warning("Top-up rejection notification failed for user %s: %s", user_id, exc)
+        log_operation(user_id, "topup_rejected", f"receipt={receipt_id};note={note}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text(f"✅ تم رفض السند #{receipt_id} وإشعار العميل.")
+        return
+
     if state == "service_name":
         context.user_data["service_name"] = text
-        context.user_data["admin_state"] = "service_category"
-        await update.message.reply_text(
-            "📂 أرسل القسم:\n"
-            "digital = الأدوات والبوكسات\n"
-            "subscriptions = الاشتراكات\n"
-            "rentals = الإيجار\n"
-            "vip = VIP\n"
-            "free = المجاني"
-        )
+        context.user_data["admin_state"] = "service_description"
+        await update.message.reply_text("📝 أرسل وصف الخدمة:")
         return
 
     if state == "service_category":
-        if text not in {"digital", "subscriptions", "rentals", "vip", "free"}:
-            await update.message.reply_text("❌ القسم غير صحيح.")
+        category = text.strip().lower()
+        if category not in {"digital", "subscriptions", "rentals", "vip", "free"}:
+            await update.message.reply_text("❌ القسم غير صحيح. استخدم digital أو subscriptions أو rentals أو vip أو free.")
             return
-        context.user_data["service_category"] = text
+        context.user_data["service_category"] = category
         context.user_data["admin_state"] = "service_description"
         await update.message.reply_text("📝 أرسل وصف الخدمة:")
         return
@@ -2110,9 +2542,9 @@ async def admin_text(update, context):
             INSERT INTO services(
                 category_key,name,description,subscription_duration,
                 activation_time,price,delivery_mode,needs_email,
-                needs_note,needs_phone
+                needs_note,needs_phone,active
             )
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
             """,
             (
                 d["service_category"],
@@ -2323,7 +2755,7 @@ def build_application():
     application.add_handler(
         CallbackQueryHandler(
             callback_router,
-            pattern=r"^(check_sub|main|cat:|service:|buy:|profile|orders|order:|fund|pay:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
+            pattern=r"^(check_sub|main|cat:|service:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
         )
     )
 
@@ -2337,10 +2769,8 @@ def build_application():
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_router)
     )
+    application.add_handler(MessageHandler(filters.PHOTO, receipt_photo_handler))
 
-    # Non-text media is intentionally handled as customer input only when an
-    # admin is not waiting for text. Free-service upload administration can be
-    # extended with this same state machine without changing the DB model.
     return application
 
 
