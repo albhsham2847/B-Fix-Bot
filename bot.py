@@ -36,11 +36,11 @@ from psycopg2 import pool
 
 from telegram import (
     Update,
-    InlineKeyboardButton,
+    InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -455,21 +455,43 @@ AUTO_MAINTENANCE_MESSAGE = (
 )
 
 
-def green_button(text, callback_data=None, url=None):
-    """Create a green button when the installed PTB version supports it.
-
-    Fall back to a normal inline button instead of breaking /start or admin pages
-    when Render still has an older python-telegram-bot release.
-    """
-    kwargs = {}
-    if callback_data is not None:
-        kwargs["callback_data"] = callback_data
-    if url is not None:
-        kwargs["url"] = url
+def green_button(*args, **kwargs):
+    """Create a green inline button, while retaining compatibility with older libraries."""
+    plain_kwargs = dict(kwargs)
+    styled_kwargs = dict(kwargs)
+    styled_kwargs["style"] = "success"
     try:
-        return InlineKeyboardButton(text, style="success", **kwargs)
+        return TelegramInlineKeyboardButton(*args, **styled_kwargs)
     except TypeError:
-        return InlineKeyboardButton(text, **kwargs)
+        return TelegramInlineKeyboardButton(*args, **plain_kwargs)
+
+
+def red_button(*args, **kwargs):
+    """Create a red inline button for cancel, back, and destructive actions."""
+    plain_kwargs = dict(kwargs)
+    styled_kwargs = dict(kwargs)
+    styled_kwargs["style"] = "danger"
+    try:
+        return TelegramInlineKeyboardButton(*args, **styled_kwargs)
+    except TypeError:
+        return TelegramInlineKeyboardButton(*args, **plain_kwargs)
+
+
+def admin_navigation_rows(back_callback="adm:home", back_label="لوحة المشرف"):
+    """Return red navigation rows for every administrative screen."""
+    rows = []
+    if back_callback and back_callback != "adm:home":
+        rows.append([red_button(f"↩️ {back_label}", callback_data=back_callback)])
+    rows.append([
+        red_button("🔴 لوحة المشرف", callback_data="adm:home"),
+        red_button("🏠 الرئيسية", callback_data="main"),
+    ])
+    return rows
+
+
+# Route all ordinary buttons through the unified green constructor. Navigation,
+# cancellation, and destructive actions call red_button explicitly.
+InlineKeyboardButton = green_button
 
 
 def add_user(user):
@@ -745,7 +767,17 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = q.from_user.id
 
     if data == "main":
+        context.user_data.clear()
         await start(update, context)
+        return
+
+    if data.startswith("flowcancel:"):
+        context.user_data.clear()
+        destination = data.split(":", 1)[1]
+        if destination == "fund":
+            await payment_methods(update)
+        else:
+            await start(update, context)
         return
 
     if data.startswith("cat:"):
@@ -799,7 +831,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardMarkup([
                 [InlineKeyboardButton("🌐 واتساب", url=WHATSAPP_LINK)],
                 [InlineKeyboardButton("🛠️ الدعم", url=SUPPORT_LINK)],
-                [InlineKeyboardButton("🔴 الرئيسية", callback_data="main")],
+                [red_button("🏠 الرئيسية", callback_data="main")],
             ]),
         )
         return
@@ -850,7 +882,7 @@ async def show_category(update, category):
         await send_or_edit(
             update,
             "❌ هذا القسم غير متاح.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔴 الرئيسية", callback_data="main")]]),
+            InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
         )
         return
 
@@ -870,7 +902,7 @@ async def show_category(update, category):
         await send_or_edit(
             update,
             f"📂 **{cat[0]}**\n\n🚧 لا توجد خدمات مضافة حاليًا.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔴 الرئيسية", callback_data="main")]]),
+            InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
         )
         return
 
@@ -892,7 +924,7 @@ async def show_category(update, category):
             )
         ])
 
-    keyboard.append([InlineKeyboardButton("🔴 الرئيسية", callback_data="main")])
+    keyboard.append([red_button("🏠 الرئيسية", callback_data="main")])
     await send_or_edit(
         update,
         f"📑 **{cat[0]}**\n\n{cat[1]}\n\n👇 اختر الخدمة:",
@@ -915,7 +947,7 @@ async def show_service(update, sid):
         await send_or_edit(
             update,
             "❌ الخدمة غير موجودة.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔴 الرئيسية", callback_data="main")]]),
+            InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
         )
         return
 
@@ -949,7 +981,8 @@ async def show_service(update, sid):
 
     keyboard = [
         [green_button("🟢 طلب الخدمة الآن", callback_data=f"buy:{sid}")],
-        [InlineKeyboardButton("🔴 رجوع للقسم", callback_data=f"cat:{srv[1]}")],
+        [red_button("↩️ رجوع للقسم", callback_data=f"cat:{srv[1]}")],
+        [red_button("🏠 الرئيسية", callback_data="main")],
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -973,7 +1006,7 @@ async def profile(update):
         InlineKeyboardMarkup([
             [InlineKeyboardButton("💰 تغذية الحساب", callback_data="fund")],
             [InlineKeyboardButton("📦 طلباتي", callback_data="orders")],
-            [InlineKeyboardButton("🔴 الرئيسية", callback_data="main")],
+            [red_button("🏠 الرئيسية", callback_data="main")],
         ]),
     )
 
@@ -991,7 +1024,7 @@ async def orders_page(update):
     )
     if not rows:
         text = "📦 **طلباتي**\n\nلا توجد طلبات حتى الآن."
-        keyboard = [[InlineKeyboardButton("🔴 الرئيسية", callback_data="main")]]
+        keyboard = [[red_button("🏠 الرئيسية", callback_data="main")]]
     else:
         text = "📦 **آخر الطلبات:**\n\n"
         keyboard = []
@@ -1003,7 +1036,7 @@ async def orders_page(update):
                     callback_data=f"order:{oid}",
                 )
             ])
-        keyboard.append([InlineKeyboardButton("🔴 الرئيسية", callback_data="main")])
+        keyboard.append([red_button("🏠 الرئيسية", callback_data="main")])
 
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -1041,7 +1074,8 @@ async def order_page(update, oid):
 
     keyboard = [
         [InlineKeyboardButton("🆘 لم أستلم طلبي / تواصل مع الإدارة", url=WHATSAPP_LINK)],
-        [InlineKeyboardButton("🔴 الطلبات", callback_data="orders")],
+            [red_button("↩️ الطلبات", callback_data="orders")],
+            [red_button("🏠 الرئيسية", callback_data="main")],
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -1061,7 +1095,7 @@ async def payment_methods(update):
     keyboard.append([
         InlineKeyboardButton("🟢 شحن عبر كود بطاقة", callback_data="customer_card")
     ])
-    keyboard.append([InlineKeyboardButton("🔴 الرئيسية", callback_data="main")])
+    keyboard.append([red_button("🏠 الرئيسية", callback_data="main")])
 
     await send_or_edit(
         update,
@@ -1090,8 +1124,8 @@ async def payment_detail(update, key):
         text,
         InlineKeyboardMarkup([
             [green_button("📤 إرسال سند التحويل", callback_data=f"receipt_start:{key}")],
-            [InlineKeyboardButton("🔵 طرق الدفع", callback_data="fund")],
-            [InlineKeyboardButton("🔴 الرئيسية", callback_data="main")],
+            [red_button("↩️ طرق الدفع", callback_data="fund")],
+            [red_button("🏠 الرئيسية", callback_data="main")],
         ]),
     )
 
@@ -1115,7 +1149,8 @@ async def receipt_start(update, context, payment_key):
         "أرسل الآن **رقم سند التحويل** كنص، أو أرسل **صورة السند** مباشرة.\n\n"
         "يمكنك كتابة مبلغ التحويل في نص الرسالة أو في وصف الصورة لتسهيل مراجعة الإدارة.\n\n"
         "⚠️ لا ترسل كلمة المرور أو رموز التحقق أو أي معلومات بطاقتك السرية.\n\n"
-        "أرسل /cancel للإلغاء.",
+        "استخدم زر الإلغاء أدناه أو أرسل /cancel للإلغاء.",
+        reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data="flowcancel:fund")]]),
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -1200,7 +1235,7 @@ async def support_page(update):
         InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 واتساب", url=WHATSAPP_LINK)],
             [InlineKeyboardButton("🛠️ الدعم على تيليجرام", url=SUPPORT_LINK)],
-            [InlineKeyboardButton("🔴 الرئيسية", callback_data="main")],
+            [red_button("🏠 الرئيسية", callback_data="main")],
         ]),
     )
 
@@ -1261,7 +1296,7 @@ async def begin_order(update, context, sid):
             "أرسل الإيميل الذي سجلت به في موقع الخدمة:\n\n"
             "⚠️ تأكد من صحة الإيميل قبل الإرسال.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚫 إلغاء", callback_data="main")]
+                [red_button("🚫 إلغاء", callback_data="flowcancel:main")]
             ]),
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -1271,7 +1306,7 @@ async def begin_order(update, context, sid):
         await update.callback_query.message.edit_text(
             "📱 أرسل رقم الهاتف المطلوب في الطلب:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚫 إلغاء", callback_data="main")]
+                [red_button("🚫 إلغاء", callback_data="flowcancel:main")]
             ]),
         )
         return
@@ -1281,7 +1316,7 @@ async def begin_order(update, context, sid):
             "📝 أرسل ملاحظتك للطلب.\n\n"
             "إذا لم تكن لديك ملاحظة، أرسل: لا يوجد",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚫 إلغاء", callback_data="main")]
+                [red_button("🚫 إلغاء", callback_data="flowcancel:main")]
             ]),
         )
         return
@@ -1323,7 +1358,7 @@ async def finalize_customer_order(update, context):
                     await send_or_edit(
                         update,
                         "❌ نفد المخزون قبل إتمام العملية.",
-                        InlineKeyboardMarkup([[InlineKeyboardButton("🔴 الرئيسية", callback_data="main")]]),
+                        InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
                     )
                     return
 
@@ -1386,7 +1421,7 @@ async def finalize_customer_order(update, context):
             "📦 تم تسجيل الطلب في سجل طلباتك.",
             InlineKeyboardMarkup([
                 [InlineKeyboardButton("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],
-                [InlineKeyboardButton("🔴 الرئيسية", callback_data="main")],
+                [red_button("🏠 الرئيسية", callback_data="main")],
             ]),
         )
         await context.bot.send_message(
@@ -1460,7 +1495,7 @@ async def finalize_customer_order(update, context):
         InlineKeyboardMarkup([
             [InlineKeyboardButton("📦 متابعة الطلب", callback_data=f"order:{oid}")],
             [InlineKeyboardButton("🆘 تواصل مع الإدارة", url=WHATSAPP_LINK)],
-            [InlineKeyboardButton("🔴 الرئيسية", callback_data="main")],
+            [red_button("🏠 الرئيسية", callback_data="main")],
         ]),
     )
 
@@ -1584,7 +1619,8 @@ async def customer_card_start(update, context):
     if not await allowed(update, context):
         return ConversationHandler.END
     await update.callback_query.message.edit_text(
-        "🎟️ **شحن بكود بطاقة**\n\nأرسل كود البطاقة الآن أو /cancel للإلغاء.",
+        "🎟️ **شحن بكود بطاقة**\n\nأرسل كود البطاقة الآن أو استخدم زر الإلغاء أدناه.",
+        reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data="flowcancel:fund")]]),
         parse_mode=ParseMode.MARKDOWN,
     )
     context.user_data["waiting_card"] = True
@@ -1639,6 +1675,7 @@ async def admin_panel(update, context):
             InlineKeyboardButton("⚙️ الصيانة", callback_data="adm:maintenance"),
             InlineKeyboardButton("📝 سجل العمليات", callback_data="adm:logs"),
         ],
+        [red_button("🏠 الرئيسية", callback_data="main")],
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -1652,8 +1689,10 @@ async def admin_callback(update, context):
     data = q.data[4:]
 
     if data == "home":
+        context.user_data.clear()
         await admin_panel(update, context)
     elif data == "services":
+        context.user_data.clear()
         await admin_services(update)
     elif data == "service_menu":
         await admin_service_menu(update)
@@ -1669,41 +1708,71 @@ async def admin_callback(update, context):
         await q.message.edit_text(
             "🛒 أرسل **اسم الخدمة** الآن.\n\nمثال: TSM Tool",
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء إضافة الخدمة", callback_data="adm:services")],
+                *admin_navigation_rows(),
+            ]),
         )
     elif data == "stats":
         await admin_stats(update)
     elif data == "orders":
+        context.user_data.clear()
         await admin_orders(update)
     elif data.startswith("order:"):
         await admin_order_page(update, int(data.split(":")[1]))
     elif data == "users":
         await admin_users(update)
     elif data == "inventory":
+        context.user_data.clear()
         await admin_inventory(update)
     elif data == "cards":
+        context.user_data.clear()
         await admin_cards(update)
     elif data == "new_card":
+        context.user_data.clear()
         context.user_data["admin_state"] = "new_card_code"
-        await q.message.edit_text("🎟️ أرسل كود البطاقة الجديدة:")
+        await q.message.edit_text(
+            "🎟️ أرسل كود البطاقة الجديدة:",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:cards")],
+                *admin_navigation_rows(),
+            ]),
+        )
     elif data == "channels":
+        context.user_data.clear()
         await admin_channels(update)
     elif data == "test_channels":
         await admin_test_channels(update, context)
     elif data == "add_channel":
+        context.user_data.clear()
         context.user_data["admin_state"] = "channel_name"
         await q.message.edit_text(
-            "📢 أرسل اسم القناة.\n\nبعده سأطلب رابط القناة ثم chat_id للتحقق الحقيقي."
+            "📢 أرسل اسم القناة.\n\nبعده سأطلب رابط القناة ثم chat_id للتحقق الحقيقي.",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:channels")],
+                *admin_navigation_rows(),
+            ]),
         )
     elif data == "buttons":
+        context.user_data.clear()
         await admin_buttons(update)
     elif data.startswith("editbutton:"):
         key = data.split(":", 1)[1]
+        context.user_data.clear()
         context.user_data["admin_state"] = "button_text"
         context.user_data["edit_button_key"] = key
-        await q.message.edit_text("✏️ أرسل النص الجديد للزر:")
+        await q.message.edit_text(
+            "✏️ أرسل النص الجديد للزر:",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:buttons")],
+                *admin_navigation_rows(),
+            ]),
+        )
     elif data == "payments":
+        context.user_data.clear()
         await admin_payments(update)
     elif data == "topups":
+        context.user_data.clear()
         await admin_topup_receipts(update)
     elif data.startswith("topup:"):
         await admin_topup_page(update, context, int(data.split(":")[1]))
@@ -1713,16 +1782,25 @@ async def admin_callback(update, context):
         context.user_data["topup_receipt_id"] = rid
         await q.message.reply_text(
             f"✅ أرسل مبلغ الشحن لسند التحويل #{rid}.\n\n"
-            "سيُضاف هذا المبلغ إلى رصيد العميل عند التأكيد. أرسل /cancel للإلغاء."
+            "سيُضاف هذا المبلغ إلى رصيد العميل عند التأكيد.",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data=f"adm:topup:{rid}")],
+                *admin_navigation_rows(),
+            ]),
         )
     elif data.startswith("reject_topup:"):
         rid = int(data.split(":")[1])
         context.user_data["admin_state"] = "topup_reject_note"
         context.user_data["topup_receipt_id"] = rid
         await q.message.reply_text(
-            f"❌ أرسل سبب رفض سند التحويل #{rid}، أو اكتب: بدون ملاحظة"
+            f"❌ أرسل سبب رفض سند التحويل #{rid}، أو اكتب: بدون ملاحظة",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data=f"adm:topup:{rid}")],
+                *admin_navigation_rows(),
+            ]),
         )
     elif data == "maintenance":
+        context.user_data.clear()
         await admin_maintenance(update)
     elif data == "maintenance_auto":
         set_setting("maintenance_message", AUTO_MAINTENANCE_MESSAGE)
@@ -1732,8 +1810,11 @@ async def admin_callback(update, context):
     elif data == "maintenance_custom":
         context.user_data["admin_state"] = "maintenance_custom_message"
         await q.message.reply_text(
-            "✍️ أرسل رسالة الصيانة الخاصة التي ستظهر للعملاء.\n\n"
-            "أرسل /cancel للإلغاء."
+            "✍️ أرسل رسالة الصيانة الخاصة التي ستظهر للعملاء.",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:maintenance")],
+                *admin_navigation_rows(),
+            ]),
         )
     elif data == "maintenance_off":
         set_setting("maintenance", "0")
@@ -1743,21 +1824,63 @@ async def admin_callback(update, context):
         set_setting("maintenance", "0" if maintenance_active() else "1")
         await admin_maintenance(update)
     elif data == "broadcast":
+        context.user_data.clear()
         context.user_data["admin_state"] = "broadcast"
-        await q.message.edit_text("📣 أرسل نص الإشعار الجماعي:")
+        await q.message.edit_text(
+            "📣 أرسل نص الإشعار الجماعي:",
+            reply_markup=InlineKeyboardMarkup(admin_navigation_rows()),
+        )
     elif data == "logs":
         await admin_logs(update)
     elif data.startswith("delete_service:"):
+        sid = int(data.split(":")[1])
+        await q.message.edit_text(
+            "⚠️ **تأكيد أرشفة الخدمة**\n\n"
+            "لن تظهر الخدمة للعملاء، لكن المخزون والطلبات سيبقيان محفوظين.\n"
+            "هل تريد المتابعة؟",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [green_button("✅ نعم، أرشف الخدمة", callback_data=f"adm:confirm_archive_service:{sid}")],
+                [red_button("↩️ إلغاء", callback_data="adm:services")],
+                *admin_navigation_rows(),
+            ]),
+        )
+    elif data.startswith("confirm_archive_service:"):
         sid = int(data.split(":")[1])
         db_execute("UPDATE services SET active=FALSE WHERE id=%s", (sid,))
         await q.answer("✅ تمت أرشفة الخدمة مع الاحتفاظ بالمخزون والطلبات.", show_alert=True)
         await admin_services(update)
     elif data.startswith("delete_channel:"):
         cid = int(data.split(":")[1])
+        await q.message.edit_text(
+            "⚠️ **تأكيد حذف القناة**\n\n"
+            "سيتوقف الاشتراك الإجباري لهذه القناة فوراً. هل تريد الحذف؟",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [green_button("✅ نعم، احذف القناة", callback_data=f"adm:confirm_delete_channel:{cid}")],
+                [red_button("↩️ إلغاء", callback_data="adm:channels")],
+                *admin_navigation_rows(),
+            ]),
+        )
+    elif data.startswith("confirm_delete_channel:"):
+        cid = int(data.split(":")[1])
         db_execute("DELETE FROM forced_channels WHERE id=%s", (cid,))
         await q.answer("✅ تم حذف القناة.", show_alert=True)
         await admin_channels(update)
     elif data.startswith("clear_inventory:"):
+        sid = int(data.split(":")[1])
+        await q.message.edit_text(
+            "⚠️ **تأكيد مسح المخزون**\n\n"
+            "سيُحذف فقط المخزون غير المباع لهذه الخدمة، ولا يمكن التراجع عن ذلك.\n"
+            "هل تريد المتابعة؟",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [green_button("✅ نعم، امسح غير المباع", callback_data=f"adm:confirm_clear_inventory:{sid}")],
+                [red_button("↩️ إلغاء", callback_data="adm:inventory")],
+                *admin_navigation_rows(),
+            ]),
+        )
+    elif data.startswith("confirm_clear_inventory:"):
         sid = int(data.split(":")[1])
         db_execute(
             "DELETE FROM inventory WHERE service_id=%s AND is_sold=FALSE",
@@ -1771,7 +1894,11 @@ async def admin_callback(update, context):
         context.user_data["stock_service_id"] = sid
         await q.message.edit_text(
             "📦 أرسل الأكواد، كل كود في سطر مستقل.\n"
-            "يمكنك أيضًا استخدام === للفصل بين الأكواد."
+            "يمكنك أيضًا استخدام === للفصل بين الأكواد.",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:inventory")],
+                *admin_navigation_rows(),
+            ]),
         )
 
 
@@ -1802,7 +1929,7 @@ async def admin_services(update):
                     callback_data=f"adm:addstock:{sid}",
                 ),
             ])
-    keyboard.append([InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")])
+    keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -1823,7 +1950,8 @@ async def admin_add_service_prompt(update, context):
             [green_button("🔧 إيجار الأدوات", callback_data="adm:newservice_category:rentals")],
             [green_button("💎 عروض VIP", callback_data="adm:newservice_category:vip")],
             [green_button("🎁 عروض مجانية", callback_data="adm:newservice_category:free")],
-            [InlineKeyboardButton("🔴 إلغاء", callback_data="adm:services")],
+            [red_button("🚫 إلغاء", callback_data="adm:services")],
+            *admin_navigation_rows(),
         ]),
     )
 
@@ -1848,7 +1976,7 @@ async def admin_stats(update):
     await send_or_edit(
         update,
         text,
-        InlineKeyboardMarkup([[InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")]]),
+        InlineKeyboardMarkup(admin_navigation_rows()),
     )
 
 
@@ -1876,7 +2004,7 @@ async def admin_orders(update):
         ])
     if not rows:
         text += "لا توجد طلبات."
-    keyboard.append([InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")])
+    keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -1894,7 +2022,7 @@ async def admin_users(update):
     await send_or_edit(
         update,
         text or "لا يوجد عملاء.",
-        InlineKeyboardMarkup([[InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")]]),
+        InlineKeyboardMarkup(admin_navigation_rows()),
     )
 
 
@@ -1919,7 +2047,7 @@ async def admin_inventory(update):
             InlineKeyboardButton("➕ إضافة أكواد", callback_data=f"adm:addstock:{sid}"),
             InlineKeyboardButton("🗑️ مسح غير المباع", callback_data=f"adm:clear_inventory:{sid}"),
         ])
-    keyboard.append([InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")])
+    keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -1945,7 +2073,7 @@ async def admin_cards(update):
     )
     keyboard = [
         [InlineKeyboardButton("➕ إنشاء بطاقة", callback_data="adm:new_card")],
-        [InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")],
+        *admin_navigation_rows(),
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -1967,7 +2095,7 @@ async def admin_topup_receipts(update):
         keyboard.append([InlineKeyboardButton(f"📄 فتح السند #{rid}", callback_data=f"adm:topup:{rid}")])
     if not rows:
         text += "لا توجد سندات تحويل حتى الآن."
-    keyboard.append([InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")])
+    keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -2007,7 +2135,8 @@ async def admin_topup_page(update, context, receipt_id):
             [InlineKeyboardButton("✅ قبول وشحن الرصيد", callback_data=f"adm:approve_topup:{receipt_id}")],
             [InlineKeyboardButton("❌ رفض السند", callback_data=f"adm:reject_topup:{receipt_id}")],
         ])
-    keyboard.append([InlineKeyboardButton("🧾 كل السندات", callback_data="adm:topups")])
+    keyboard.append([red_button("↩️ كل السندات", callback_data="adm:topups")])
+    keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
     if row[6]:
         await context.bot.send_photo(ADMIN_ID, row[6], caption=f"صورة سند التحويل #{receipt_id}")
@@ -2102,7 +2231,7 @@ async def admin_channels(update):
         ])
     if not rows:
         text += "لا توجد قنوات."
-    keyboard.append([InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")])
+    keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -2115,7 +2244,7 @@ async def admin_test_channels(update, context):
         await send_or_edit(
             update,
             "📢 لا توجد قنوات مفعلة للاشتراك الإجباري.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔴 القنوات", callback_data="adm:channels")]]),
+            InlineKeyboardMarkup(admin_navigation_rows("adm:channels", "القنوات")),
         )
         return
 
@@ -2143,7 +2272,7 @@ async def admin_test_channels(update, context):
     await send_or_edit(
         update,
         text,
-        InlineKeyboardMarkup([[InlineKeyboardButton("🔴 القنوات", callback_data="adm:channels")]]),
+        InlineKeyboardMarkup(admin_navigation_rows("adm:channels", "القنوات")),
     )
 
 
@@ -2162,7 +2291,7 @@ async def admin_buttons(update):
                 callback_data=f"adm:editbutton:{key}",
             )
         ])
-    keyboard.append([InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")])
+    keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -2178,7 +2307,7 @@ async def admin_payments(update):
     await send_or_edit(
         update,
         text,
-        InlineKeyboardMarkup([[InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")]]),
+        InlineKeyboardMarkup(admin_navigation_rows()),
     )
 
 
@@ -2197,8 +2326,8 @@ async def admin_maintenance(update):
         InlineKeyboardMarkup([
             [green_button("⚡ تشغيل برسالة تلقائية", callback_data="adm:maintenance_auto")],
             [green_button("✍️ تشغيل برسالة خاصة", callback_data="adm:maintenance_custom")],
-            [InlineKeyboardButton("⛔ إيقاف وضع الصيانة", callback_data="adm:maintenance_off")],
-            [InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")],
+            [red_button("⛔ إيقاف وضع الصيانة", callback_data="adm:maintenance_off")],
+            *admin_navigation_rows(),
         ]),
     )
 
@@ -2217,7 +2346,7 @@ async def admin_logs(update):
     await send_or_edit(
         update,
         text or "لا توجد عمليات.",
-        InlineKeyboardMarkup([[InlineKeyboardButton("🔴 لوحة المشرف", callback_data="adm:home")]]),
+        InlineKeyboardMarkup(admin_navigation_rows()),
     )
 
 
@@ -2261,12 +2390,13 @@ async def admin_order_page(update, oid):
     keyboard = [
         [
             InlineKeyboardButton("📨 بدء التسليم", callback_data=f"deliver:{oid}"),
-            InlineKeyboardButton("❌ إلغاء", callback_data=f"cancelorder:{oid}"),
+            red_button("❌ إلغاء الطلب", callback_data=f"cancelorder:{oid}"),
         ],
         [
             InlineKeyboardButton("✅ إنهاء الطلب", callback_data=f"done:{oid}"),
         ],
-        [InlineKeyboardButton("📋 الطلبات", callback_data="adm:orders")],
+        [red_button("↩️ الطلبات", callback_data="adm:orders")],
+        *admin_navigation_rows(),
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -2297,8 +2427,11 @@ async def admin_start_delivery(update, context, oid):
         "مثال:\n"
         "تم تفعيل اشتراكك بنجاح.\n"
         "Email: ...\n"
-        "Password: ...\n\n"
-        "أرسل /cancel للإلغاء.",
+        "Password: ...",
+        reply_markup=InlineKeyboardMarkup([
+            [red_button("🚫 إلغاء", callback_data=f"adm:order:{oid}")],
+            *admin_navigation_rows(),
+        ]),
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -2337,6 +2470,9 @@ async def admin_finish_delivery(update, context, oid):
 
 
 async def admin_cancel_order(update, context, oid):
+    if not is_admin(update.effective_user.id):
+        await update.callback_query.answer("🚫 غير مصرح.", show_alert=True)
+        return
     # نقفل الطلب أولاً؛ بهذه الطريقة لا يمكن لزرتين متتاليتين إعادة الرصيد مرتين.
     conn = DB_POOL.getconn()
     cancelled = None
@@ -2384,11 +2520,32 @@ async def admin_cancel_order(update, context, oid):
 
 
 async def admin_approve_order(update, context, oid):
-    # Kept as a dedicated action for future moderation flows.
-    db_execute(
-        "UPDATE orders SET status='قيد التنفيذ ⏳',updated_at=CURRENT_TIMESTAMP WHERE id=%s",
-        (oid,),
-    )
+    if not is_admin(update.effective_user.id):
+        await update.callback_query.answer("🚫 غير مصرح.", show_alert=True)
+        return
+    conn = DB_POOL.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM orders WHERE id=%s FOR UPDATE", (oid,))
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                await update.callback_query.answer("❌ الطلب غير موجود.", show_alert=True)
+                return
+            if str(row[0]).startswith("مكتمل") or str(row[0]).startswith("ملغي"):
+                conn.rollback()
+                await update.callback_query.answer("⚠️ لا يمكن اعتماد طلب مكتمل أو ملغي.", show_alert=True)
+                return
+            cur.execute(
+                "UPDATE orders SET status='قيد التنفيذ ⏳',updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                (oid,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        DB_POOL.putconn(conn)
     await update.callback_query.answer("✅ تم اعتماد الطلب.", show_alert=True)
     await admin_order_page(update, oid)
 
@@ -2638,6 +2795,12 @@ async def admin_text(update, context):
         return
 
     if state == "channel_chat_id":
+        if not valid_chat_id(text):
+            await update.message.reply_text(
+                "❌ chat_id غير صحيح. أرسل رقماً يبدأ عادةً بـ `-100` أو @username صالحاً.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
         d = context.user_data
         db_execute(
             """
@@ -2646,7 +2809,7 @@ async def admin_text(update, context):
             """,
             (d["channel_name"], d["channel_link"], text),
         )
-        await update.message.reply_text("✅ تمت إضافة القناة.")
+        await update.message.reply_text("✅ تمت إضافة القناة. استخدم زر اختبار إعداد القنوات للتأكد من وصول البوت.")
         context.user_data.clear()
         return
 
@@ -2661,22 +2824,47 @@ async def admin_text(update, context):
         return
 
     if state == "broadcast":
+        if not text or len(text) > 3500:
+            await update.message.reply_text("❌ الإشعار يجب أن يكون بين 1 و3500 حرفاً.")
+            return
         rows = db_execute("SELECT user_id FROM users WHERE is_blocked=FALSE", fetchall=True)
         sent = failed = 0
         for (uid,) in rows:
-            try:
-                await context.bot.send_message(
-                    uid,
-                    f"📢 **إشعار من الإدارة**\n\n{text}",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+            delivered = False
+            for attempt in range(2):
+                try:
+                    await context.bot.send_message(uid, f"📢 إشعار من الإدارة\n\n{text}")
+                    delivered = True
+                    break
+                except RetryAfter as exc:
+                    if attempt == 1:
+                        failed += 1
+                        log.warning("Broadcast rate limit persisted for user %s", uid)
+                        break
+                    wait_for = getattr(exc, "retry_after", 1)
+                    if hasattr(wait_for, "total_seconds"):
+                        wait_for = wait_for.total_seconds()
+                    await asyncio.sleep(float(wait_for) + 0.5)
+                except Forbidden:
+                    failed += 1
+                    log.info("Broadcast skipped blocked/unavailable user %s", uid)
+                    break
+                except TelegramError as exc:
+                    log.warning("Broadcast failed for user %s: %s", uid, exc)
+                    if attempt == 1:
+                        failed += 1
+                except Exception as exc:
+                    log.exception("Unexpected broadcast failure for user %s: %s", uid, exc)
+                    failed += 1
+                    break
+            if delivered:
                 sent += 1
-            except Exception:
-                failed += 1
+            await asyncio.sleep(0.04)
         db_execute(
             "INSERT INTO broadcasts(content,sent_count,failed_count) VALUES(%s,%s,%s)",
             (text, sent, failed),
         )
+        log_operation(ADMIN_ID, "broadcast_sent", f"sent={sent};failed={failed}", ADMIN_ID)
         await update.message.reply_text(
             f"✅ انتهى الإرسال.\n🟢 نجح: {sent}\n🔴 فشل: {failed}"
         )
@@ -2763,7 +2951,7 @@ def build_application():
     application.add_handler(
         CallbackQueryHandler(
             callback_router,
-            pattern=r"^(check_sub|main|cat:|service:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
+            pattern=r"^(check_sub|main|flowcancel:|cat:|service:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
         )
     )
 
