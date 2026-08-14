@@ -456,12 +456,20 @@ AUTO_MAINTENANCE_MESSAGE = (
 
 
 def green_button(text, callback_data=None, url=None):
-    kwargs = {"api_kwargs": {"style": "bg_success"}}
+    """Create a green button when the installed PTB version supports it.
+
+    Fall back to a normal inline button instead of breaking /start or admin pages
+    when Render still has an older python-telegram-bot release.
+    """
+    kwargs = {}
     if callback_data is not None:
         kwargs["callback_data"] = callback_data
     if url is not None:
         kwargs["url"] = url
-    return InlineKeyboardButton(text, **kwargs)
+    try:
+        return InlineKeyboardButton(text, style="success", **kwargs)
+    except TypeError:
+        return InlineKeyboardButton(text, **kwargs)
 
 
 def add_user(user):
