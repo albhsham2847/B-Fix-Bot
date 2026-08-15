@@ -27,8 +27,6 @@ import logging
 import asyncio
 import threading
 import re
-from contextvars import ContextVar
-from functools import wraps
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
@@ -473,33 +471,9 @@ AUTO_MAINTENANCE_MESSAGE = (
 )
 
 
-# لا يرسل البوت ألواناً خاصة افتراضياً؛ تظهر الأزرار بنمط تطبيق تيليجرام العادي.
-# المستخدم الذي يعلن Bot API أنه Premium فقط يحصل على تلميحات النجاح/الخطر الاختيارية.
-BUTTON_COLORS_ENABLED = ContextVar("button_colors_enabled", default=False)
-
-
-def user_prefers_colored_buttons(user):
-    return bool(getattr(user, "is_premium", False))
-
-
-def themed_handler(handler):
-    """Apply the optional button theme only for the current Premium user update."""
-    @wraps(handler)
-    async def wrapped(update, context, *args, **kwargs):
-        token = BUTTON_COLORS_ENABLED.set(
-            user_prefers_colored_buttons(getattr(update, "effective_user", None))
-        )
-        try:
-            return await handler(update, context, *args, **kwargs)
-        finally:
-            BUTTON_COLORS_ENABLED.reset(token)
-    return wrapped
-
-
 def styled_button(style, *args, **kwargs):
+    """Create a styled button with a safe fallback for older Telegram libraries."""
     plain_kwargs = dict(kwargs)
-    if not BUTTON_COLORS_ENABLED.get():
-        return TelegramInlineKeyboardButton(*args, **plain_kwargs)
     styled_kwargs = dict(kwargs)
     styled_kwargs["style"] = style
     try:
@@ -509,12 +483,12 @@ def styled_button(style, *args, **kwargs):
 
 
 def green_button(*args, **kwargs):
-    """Use green only when the recipient is a Premium user; otherwise use native styling."""
+    """Green button for normal actions in all supported clients."""
     return styled_button("success", *args, **kwargs)
 
 
 def red_button(*args, **kwargs):
-    """Use red only when the recipient is a Premium user; otherwise use native styling."""
+    """Red button for back, cancel, and destructive actions in all supported clients."""
     return styled_button("danger", *args, **kwargs)
 
 
@@ -580,6 +554,60 @@ def log_operation(user_id, action, details="", admin_id=None):
     )
 
 
+OPERATION_LABELS = {
+    "topup_receipt_submitted": "إرسال سند تحويل",
+    "topup_approved": "قبول سند وشحن الرصيد",
+    "topup_rejected": "رفض سند تحويل",
+    "stock_purchase": "شراء خدمة وتسليم فوري",
+    "manual_order": "إنشاء طلب يحتاج تنفيذًا",
+    "order_cancelled": "إلغاء طلب وإعادة الرصيد",
+    "admin_delivery": "تسليم طلب من الإدارة",
+    "broadcast_sent": "إرسال إشعار جماعي",
+}
+
+OPERATION_DETAIL_LABELS = {
+    "order": "رقم الطلب",
+    "service": "رقم الخدمة",
+    "price": "السعر",
+    "receipt": "رقم السند",
+    "payment": "وسيلة الدفع",
+    "amount": "مبلغ الشحن",
+    "refund": "المبلغ المُعاد",
+    "note": "ملاحظة الإدارة",
+    "sent": "الإرسال الناجح",
+    "failed": "الإرسال الفاشل",
+}
+
+
+def arabic_operation_type(action):
+    return OPERATION_LABELS.get(action, f"عملية نظام: {action or 'غير محددة'}")
+
+
+def arabic_operation_details(details):
+    """Convert the compact audit data into readable Arabic without changing stored records."""
+    details = (details or "").strip()
+    if not details:
+        return "لا توجد تفاصيل إضافية."
+    rendered = []
+    for item in details.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" in item:
+            key, value = item.split("=", 1)
+            label = OPERATION_DETAIL_LABELS.get(key.strip().lower(), key.strip())
+            rendered.append(f"• {label}: {value.strip() or '—'}")
+        else:
+            rendered.append(f"• {item}")
+    return "\n".join(rendered) if rendered else "لا توجد تفاصيل إضافية."
+
+
+def format_operation_time(value):
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value or "غير متاح")
+
+
 def maintenance_active():
     return get_setting("maintenance", "0") == "1"
 
@@ -635,69 +663,8 @@ def member_is_active(member):
 
 
 async def subscription_ok(update, context):
-    user = update.effective_user
-    if not user or is_admin(user.id):
-        return True
-
-    channels = db_execute(
-        "SELECT id,name,link,chat_id FROM forced_channels WHERE active=TRUE ORDER BY id",
-        fetchall=True,
-    )
-    if not channels:
-        return True
-
-    missing = []
-    misconfigured = []
-    for channel_id, name, link, chat_id in channels:
-        chat_id = (chat_id or "").strip()
-        if not valid_chat_id(chat_id):
-            misconfigured.append(name)
-            log.warning("Forced channel #%s has invalid chat_id: %r", channel_id, chat_id)
-            continue
-        try:
-            member = await context.bot.get_chat_member(normalized_chat_id(chat_id), user.id)
-            if not member_is_active(member):
-                missing.append((name, link))
-        except (Forbidden, BadRequest) as exc:
-            # لا نعرض العميل كغير منضم عندما تكون المشكلة في صلاحيات البوت أو chat_id.
-            misconfigured.append(name)
-            log.warning("Cannot verify forced channel #%s (%s): %s", channel_id, name, exc)
-        except TelegramError as exc:
-            misconfigured.append(name)
-            log.warning("Temporary Telegram failure while checking channel #%s: %s", channel_id, exc)
-
-    if misconfigured:
-        text = (
-            "⚙️ **التحقق من الاشتراك متوقف مؤقتًا**\n\n"
-            "تعذر على البوت الوصول إلى إعدادات إحدى القنوات المطلوبة. "
-            "تم إشعار الإدارة لإصلاح الإعداد، ويرجى المحاولة لاحقًا."
-        )
-        if update.callback_query:
-            await update.callback_query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
-        elif update.message:
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-        return False
-
-    if not missing:
-        return True
-
-    keyboard = [[InlineKeyboardButton(f"📢 {name}", url=link)] for name, link in missing]
-    keyboard.append([green_button("✅ تحقق من الاشتراك", callback_data="check_sub")])
-    text = (
-        "🔒 **الاشتراك مطلوب أولًا**\n\n"
-        "للاستفادة من متجر B-Fix، اشترك في القنوات المطلوبة ثم اضغط «تحقق من الاشتراك»."
-    )
-
-    if update.callback_query:
-        try:
-            await update.callback_query.message.edit_text(
-                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN
-            )
-        except TelegramError:
-            await update.callback_query.answer("⚠️ اشترك في القنوات المطلوبة أولًا.", show_alert=True)
-    elif update.message:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-    return False
+    """Forced subscription is disabled: every customer can use the store directly."""
+    return True
 
 
 def button_text(key, fallback):
@@ -1788,7 +1755,7 @@ async def admin_callback(update, context):
         context.user_data.clear()
         context.user_data["admin_state"] = "channel_name"
         await q.message.edit_text(
-            "📢 أرسل اسم القناة.\n\nبعده سأطلب رابط القناة ثم chat_id للتحقق الحقيقي.",
+            "📢 أرسل اسم القناة الاختيارية.\n\nبعده سأطلب رابطها فقط؛ لا يوجد تحقق اشتراك أو chat_id.",
             reply_markup=InlineKeyboardMarkup([
                 [red_button("🚫 إلغاء", callback_data="adm:channels")],
                 *admin_navigation_rows(),
@@ -2268,14 +2235,17 @@ async def admin_channels(update):
             InlineKeyboardMarkup(admin_navigation_rows()),
         )
         return
-    text = "📢 **قنوات الاشتراك الإجباري**\n\n"
+    text = (
+        "📢 **قناة المتجر — اختيارية**\n\n"
+        "لا يوجد اشتراك إجباري في هذا البوت؛ العميل يستطيع استخدام جميع الأقسام مباشرة.\n"
+        "القنوات المعروضة هنا تُستخدم كرابط اختياري فقط.\n\n"
+    )
     keyboard = [
-        [InlineKeyboardButton("➕ إضافة قناة", callback_data="adm:add_channel")],
-        [InlineKeyboardButton("🔍 اختبار إعداد القنوات", callback_data="adm:test_channels")],
+        [InlineKeyboardButton("➕ إضافة رابط قناة اختياري", callback_data="adm:add_channel")],
     ]
     for cid, name, link, chat_id, active in rows:
-        text += f"▪️ {name} — {'🟢' if active else '🔴'}\n"
-        text += f"   chat_id: {chat_id or 'غير مضبوط'}\n"
+        text += f"▪️ {name} — {'🟢 ظاهر كرابط اختياري' if active else '🔴 مخفي'}\n"
+        text += f"   الرابط: {link or 'غير مضبوط'}\n"
         keyboard.append([
             InlineKeyboardButton("🗑️ حذف", callback_data=f"adm:delete_channel:{cid}")
         ])
@@ -2286,43 +2256,12 @@ async def admin_channels(update):
 
 
 async def admin_test_channels(update, context):
-    rows = db_execute(
-        "SELECT id,name,chat_id,active FROM forced_channels WHERE active=TRUE ORDER BY id",
-        fetchall=True,
-    )
-    if not rows:
-        await send_or_edit(
-            update,
-            "📢 لا توجد قنوات مفعلة للاشتراك الإجباري.",
-            InlineKeyboardMarkup(admin_navigation_rows("adm:channels", "القنوات")),
-        )
-        return
-
-    results = []
-    for channel_id, name, chat_id, active in rows:
-        chat_id = (chat_id or "").strip()
-        if not valid_chat_id(chat_id):
-            results.append(f"🔴 {name}: chat_id غير صالح أو غير مضاف")
-            continue
-        try:
-            bot_member = await context.bot.get_chat_member(normalized_chat_id(chat_id), context.bot.id)
-            if member_is_active(bot_member):
-                results.append(f"🟢 {name}: البوت يستطيع الوصول إلى القناة")
-            else:
-                results.append(f"🔴 {name}: أضف البوت مشرفًا في القناة")
-        except (Forbidden, BadRequest) as exc:
-            results.append(f"🔴 {name}: لا يمكن الوصول؛ راجع chat_id وأضف البوت مشرفًا")
-            log.warning("Forced-channel test failed for %s: %s", channel_id, exc)
-        except TelegramError as exc:
-            results.append(f"🟡 {name}: تعذر الاختبار مؤقتًا؛ حاول لاحقًا")
-            log.warning("Forced-channel test temporarily failed for %s: %s", channel_id, exc)
-
-    text = "🔍 **فحص قنوات الاشتراك**\n\n" + "\n".join(results)
-    text += "\n\nإذا ظهرت 🔴، تأكد من أن البوت مشرف في القناة وأن chat_id يبدأ عادةً بـ `-100`."
     await send_or_edit(
         update,
-        text,
-        InlineKeyboardMarkup(admin_navigation_rows("adm:channels", "القنوات")),
+        "ℹ️ **الاشتراك الإجباري معطّل**\n\n"
+        "لا يحتاج العميل للانضمام إلى أي قناة، ولا يحتاج البوت إلى صلاحيات مشرف للتحقق من العضوية. "
+        "يمكنك الاحتفاظ برابط قناة المتجر كخيار اختياري فقط.",
+        InlineKeyboardMarkup(admin_navigation_rows("adm:channels", "القناة")),
     )
 
 
@@ -2386,8 +2325,8 @@ async def admin_logs(update):
     try:
         rows = db_execute(
             """
-            SELECT action,details,created_at
-            FROM operation_log ORDER BY id DESC LIMIT 25
+            SELECT id,user_id,admin_id,action,details,created_at
+            FROM operation_log ORDER BY id DESC LIMIT 15
             """,
             fetchall=True,
         )
@@ -2399,13 +2338,38 @@ async def admin_logs(update):
             InlineKeyboardMarkup(admin_navigation_rows()),
         )
         return
-    text = "📝 **آخر العمليات**\n\n"
-    for action, details, created in rows:
-        text += f"▪️ {created}\n{action}: {details}\n\n"
+
+    if not rows:
+        text = (
+            "📝 **سجل العمليات**\n\n"
+            "لا توجد عمليات مسجلة حتى الآن.\n\n"
+            "يعرض هذا القسم عمليات الشحن والطلبات والتسليم والإلغاء والإشعارات الجماعية."
+        )
+    else:
+        blocks = []
+        for operation_id, user_id, admin_id, action, details, created in rows:
+            parties = []
+            if user_id:
+                parties.append(f"👤 العميل: `{user_id}`")
+            if admin_id:
+                parties.append(f"👑 المدير: `{admin_id}`")
+            party_text = "\n".join(parties) if parties else "👤 الجهة: النظام"
+            blocks.append(
+                f"🆔 **العملية #{operation_id}**\n"
+                f"🗂️ النوع: **{arabic_operation_type(action)}**\n"
+                f"{party_text}\n"
+                f"⏰ الوقت: {format_operation_time(created)}\n"
+                f"📌 التفاصيل:\n{arabic_operation_details(details)}"
+            )
+        text = "📝 **سجل العمليات — آخر 15 عملية**\n\n" + "\n\n────────────\n\n".join(blocks)
+
     await send_or_edit(
         update,
-        text or "لا توجد عمليات.",
-        InlineKeyboardMarkup(admin_navigation_rows()),
+        text,
+        InlineKeyboardMarkup([
+            [green_button("🔄 تحديث السجل", callback_data="adm:logs")],
+            *admin_navigation_rows(),
+        ]),
     )
 
 
@@ -2844,31 +2808,18 @@ async def admin_text(update, context):
         return
 
     if state == "channel_link":
-        context.user_data["channel_link"] = text
-        context.user_data["admin_state"] = "channel_chat_id"
-        await update.message.reply_text(
-            "🆔 أرسل chat_id للقناة للتحقق الحقيقي من الاشتراك.\n"
-            "مثال: -1001234567890\n"
-            "إذا تركته فارغًا لن يستطيع البوت التحقق آليًا."
-        )
-        return
-
-    if state == "channel_chat_id":
-        if not valid_chat_id(text):
-            await update.message.reply_text(
-                "❌ chat_id غير صحيح. أرسل رقماً يبدأ عادةً بـ `-100` أو @username صالحاً.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+        if not text.startswith(("https://t.me/", "http://t.me/", "t.me/")):
+            await update.message.reply_text("❌ أرسل رابط قناة تيليجرام صحيحاً يبدأ بـ https://t.me/")
             return
         d = context.user_data
         db_execute(
             """
             INSERT INTO forced_channels(name,link,chat_id)
-            VALUES(%s,%s,%s)
+            VALUES(%s,%s,'')
             """,
-            (d["channel_name"], d["channel_link"], text),
+            (d["channel_name"], text),
         )
-        await update.message.reply_text("✅ تمت إضافة القناة. استخدم زر اختبار إعداد القنوات للتأكد من وصول البوت.")
+        await update.message.reply_text("✅ تمت إضافة رابط القناة الاختياري. لن يُطلب من العملاء الاشتراك فيها.")
         context.user_data.clear()
         return
 
@@ -2994,14 +2945,14 @@ async def cancel(update, context):
 def build_application():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", themed_handler(start)))
-    application.add_handler(CommandHandler("admin", themed_handler(admin_command)))
-    application.add_handler(CommandHandler("cancel", themed_handler(cancel)))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("cancel", cancel))
 
     # Customer card flow.
     application.add_handler(
         CallbackQueryHandler(
-            themed_handler(customer_card_start),
+            customer_card_start,
             pattern=r"^customer_card$",
         )
     )
@@ -3009,26 +2960,22 @@ def build_application():
     # Main callbacks.
     application.add_handler(
         CallbackQueryHandler(
-            themed_handler(callback_router),
+            callback_router,
             pattern=r"^(check_sub|main|flowcancel:|cat:|service:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
         )
     )
 
     # Admin/customer text router.
     async def text_router(update, context):
-        token = BUTTON_COLORS_ENABLED.set(user_prefers_colored_buttons(update.effective_user))
-        try:
-            if update.effective_user.id == ADMIN_ID and context.user_data.get("admin_state"):
-                await admin_text(update, context)
-                return
-            await customer_text(update, context)
-        finally:
-            BUTTON_COLORS_ENABLED.reset(token)
+        if update.effective_user.id == ADMIN_ID and context.user_data.get("admin_state"):
+            await admin_text(update, context)
+            return
+        await customer_text(update, context)
 
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_router)
     )
-    application.add_handler(MessageHandler(filters.PHOTO, themed_handler(receipt_photo_handler)))
+    application.add_handler(MessageHandler(filters.PHOTO, receipt_photo_handler))
 
     return application
 
