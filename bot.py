@@ -1567,6 +1567,26 @@ async def begin_order(update, context, sid):
 async def claim_free_offer(update, context, srv):
     """Grant exactly one free-offer claim per customer without charging a balance."""
     uid, sid = update.effective_user.id, srv[0]
+    content = (srv[14] or "").strip()
+    link = (srv[15] or "").strip()
+    photo_id = (srv[16] or "").strip()
+    document_id = (srv[17] or "").strip()
+
+    # Services created in earlier updates stored one attachment in file_id/file_kind.
+    # Preserve that existing content instead of requiring the owner to recreate the offer.
+    legacy_file_id = (srv[11] or "").strip()
+    legacy_file_kind = (srv[12] or "").strip()
+    if not photo_id and legacy_file_kind == "photo":
+        photo_id = legacy_file_id
+    if not document_id and legacy_file_kind == "document":
+        document_id = legacy_file_id
+    if not any((content, link, photo_id, document_id)):
+        await update.callback_query.answer(
+            "⚠️ هذا العرض لم تُضف له رسالة أو رابط أو صورة أو ملف بعد.",
+            show_alert=True,
+        )
+        return
+
     conn = DB_POOL.getconn()
     try:
         with conn.cursor() as cur:
@@ -1605,51 +1625,58 @@ async def claim_free_offer(update, context, srv):
     finally:
         DB_POOL.putconn(conn)
 
-    content = (srv[14] or "").strip()
-    link = (srv[15] or "").strip()
-    photo_id = (srv[16] or "").strip()
-    document_id = (srv[17] or "").strip()
+    delivered_parts = []
     try:
+        await context.bot.send_message(
+            uid,
+            f"🎁 **هدية خاصة لك — {srv[2]}**\n\n"
+            "تم تجهيز عرضك المجاني وتسليمه تلقائياً. استمتع به!",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         if content or link:
-            text = f"🎁 **{srv[2]}**\n\n{content}"
+            text = content or "🎁 محتوى العرض المجاني"
             if link:
                 text += f"\n\n🔗 الرابط: {link}"
             await context.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN)
+            delivered_parts.append("النص/الرابط")
         if photo_id:
             await context.bot.send_photo(uid, photo_id, caption=f"🖼️ صورة عرض: {srv[2]}")
+            delivered_parts.append("الصورة")
         if document_id:
             await context.bot.send_document(uid, document_id, caption=f"📎 ملف عرض: {srv[2]}")
+            delivered_parts.append("الملف")
+        delivered_summary = "، ".join(delivered_parts)
         db_execute(
             "UPDATE orders SET status='مكتمل ✅ - تم تسليم العرض',delivered_text=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s",
-            ("تم تسليم النص والرابط والصورة والملف تلقائياً.", oid),
+            (f"تم التسليم التلقائي: {delivered_summary}.", oid),
         )
-        log_operation(uid, "free_offer_claimed", f"order={oid};service={sid}")
+        log_operation(uid, "free_offer_auto_delivered", f"order={oid};service={sid};content={delivered_summary}")
         await send_or_edit(
             update,
-            "✅ **تم استلام العرض المجاني بنجاح**\n\n"
-            "أرسل البوت لك النص والرابط والصورة والملف في رسائل منفصلة.\n"
+            "✅ **تم تسليم هديتك بنجاح**\n\n"
+            "ستجد محتوى العرض في الرسائل التي أرسلها لك البوت الآن.\n"
             "يمكنك استلام عرض مجاني جديد بعد مرور 24 ساعة من آخر مطالبة.",
             InlineKeyboardMarkup([
                 [green_button("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],
                 [red_button("🏠 الرئيسية", callback_data="main")],
             ]),
         )
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"✅ **تم تسليم عرض مجاني تلقائياً #{oid}**\n\n"
+            f"👤 العميل: {update.effective_user.full_name}\n"
+            f"🆔 `{uid}`\n"
+            f"🛒 العرض: {srv[2]}\n"
+            f"📦 المحتوى المرسل: {delivered_summary}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
     except TelegramError as exc:
-        log.warning("Free offer delivery failed for order %s: %s", oid, exc)
+        log.warning("Free offer automatic delivery failed for order %s: %s", oid, exc)
         await send_or_edit(
             update,
-            "⚠️ تم تسجيل طلب العرض المجاني، لكن تعذر تسليم أحد المرفقات تلقائياً. ستراجعه الإدارة.",
-            InlineKeyboardMarkup([
-                [green_button("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],
-                [red_button("🏠 الرئيسية", callback_data="main")],
-            ]),
+            "⚠️ تعذر إرسال محتوى العرض تلقائياً بسبب مشكلة مؤقتة في تيليجرام. حاول مرة أخرى لاحقاً.",
+            InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
         )
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"🎁 **مطالبة عرض مجاني #{oid}**\n\n👤 {update.effective_user.full_name}\n🆔 `{uid}`\n🛒 {srv[2]}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[green_button("📄 فتح الطلب", callback_data=f"adm:order:{oid}")]]),
-    )
 
 
 async def request_order_confirmation(update, context):
