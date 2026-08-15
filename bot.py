@@ -316,6 +316,8 @@ def init_db():
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS needs_note BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS needs_phone BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS file_id TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS file_kind TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS pre_purchase_message TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
         "UPDATE services SET active=TRUE WHERE active IS NULL",
@@ -854,6 +856,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_service(update, int(data.split(":")[1]))
         return
 
+    if data.startswith("buyconfirm:"):
+        if not context.user_data.get("order_confirm_required"):
+            await q.answer("⚠️ ابدأ الطلب من صفحة الخدمة أولاً.", show_alert=True)
+            return
+        context.user_data.pop("order_confirm_required", None)
+        await finalize_customer_order(update, context)
+        return
+
     if data.startswith("buy:"):
         await begin_order(update, context, int(data.split(":")[1]))
         return
@@ -1017,7 +1027,7 @@ async def show_service(update, sid):
         """
         SELECT id,category_key,name,description,subscription_duration,
                activation_time,price,delivery_mode,needs_email,needs_note,
-               needs_phone
+               needs_phone,pre_purchase_message
         FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
         """,
         (sid,),
@@ -1037,13 +1047,17 @@ async def show_service(update, sid):
         fetch=True,
     )[0]
 
+    duration_label = "مدة الإيجار" if srv[1] == "rentals" else "مدة الاشتراك"
+    activation_label = "وقت تسليم بيانات الإيجار" if srv[1] == "rentals" else "مدة التفعيل/التسليم"
     text = (
         f"📌 **{srv[2]}**\n\n"
         f"📝 **الوصف:** {srv[3] or 'غير محدد'}\n"
-        f"⏳ **مدة الاشتراك:** {srv[4] or 'حسب الخدمة'}\n"
-        f"⚡ **مدة التفعيل/التسليم:** {srv[5] or 'حسب الخدمة'}\n"
+        f"⏳ **{duration_label}:** {srv[4] or 'حسب الخدمة'}\n"
+        f"⚡ **{activation_label}:** {srv[5] or 'حسب الخدمة'}\n"
         f"💵 **السعر:** {money(srv[6])}$\n"
     )
+    if srv[11]:
+        text += f"\nℹ️ **تعليمات قبل الطلب:**\n{srv[11]}\n"
     if srv[7] == "stock":
         text += f"📦 **المخزون المتوفر:** {stock}\n"
     if srv[8]:
@@ -1073,11 +1087,27 @@ async def show_service(update, sid):
 
 async def profile(update):
     user = get_user(update.effective_user.id)
+    uid = update.effective_user.id
+    spent = safe_stat_value(
+        "SELECT COALESCE(SUM(total),0) FROM orders WHERE user_id=%s AND COALESCE(status,'') NOT LIKE 'ملغي%'",
+        params=(uid,),
+    )
+    approved = safe_stat_value(
+        "SELECT COUNT(*) FROM orders WHERE user_id=%s AND status LIKE 'مكتمل%'",
+        params=(uid,),
+    )
+    rejected = safe_stat_value(
+        "SELECT COUNT(*) FROM orders WHERE user_id=%s AND status LIKE 'ملغي%'",
+        params=(uid,),
+    )
     text = (
         "👤 **حسابي**\n\n"
         f"▪️ الاسم: {user[1]}\n"
         f"▪️ الآيدي: `{user[0]}`\n"
-        f"▪️ الرصيد: **{money(user[2])}$**\n"
+        f"▪️ الرصيد الحالي: **{money(user[2])}$**\n"
+        f"▪️ الرصيد المصروف: **{money(spent)}$**\n"
+        f"▪️ عمليات الشراء المقبولة: **{approved}**\n"
+        f"▪️ العمليات الملغاة/المرفوضة: **{rejected}**\n"
         f"▪️ حالة الحساب: {'🟢 فعال' if not user[3] else '🔴 موقوف'}"
     )
     await send_or_edit(
@@ -1295,7 +1325,31 @@ async def submit_topup_receipt(update, context, receipt_number="", photo_file_id
     log_operation(user.id, "topup_receipt_submitted", f"receipt={receipt_id};payment={payment_key}")
 
 
+async def service_media_handler(update, context):
+    """Save one Telegram-hosted image or document for an admin-selected service."""
+    if update.effective_user.id != ADMIN_ID or context.user_data.get("admin_state") != "service_file":
+        return False
+    sid = context.user_data.get("service_file_id")
+    message = update.message
+    if message.photo:
+        file_id, file_kind = message.photo[-1].file_id, "photo"
+    elif message.document:
+        file_id, file_kind = message.document.file_id, "document"
+    else:
+        return False
+    db_execute(
+        "UPDATE services SET file_id=%s,file_kind=%s WHERE id=%s",
+        (file_id, file_kind, sid),
+    )
+    log_operation(None, "service_media_updated", f"service={sid};kind={file_kind}", ADMIN_ID)
+    context.user_data.clear()
+    await update.message.reply_text("✅ تم حفظ المرفق للخدمة. سيتم تسليمه تلقائياً مع العروض المجانية.")
+    return True
+
+
 async def receipt_photo_handler(update, context):
+    if await service_media_handler(update, context):
+        return
     if not context.user_data.get("waiting_topup_receipt"):
         return
     if not await allowed(update, context):
@@ -1303,6 +1357,17 @@ async def receipt_photo_handler(update, context):
     photo_file_id = update.message.photo[-1].file_id
     caption = (update.message.caption or "").strip()
     await submit_topup_receipt(update, context, receipt_number=caption, photo_file_id=photo_file_id)
+
+
+async def document_handler(update, context):
+    await service_media_handler(update, context)
+
+
+async def deliver_service_media(bot, user_id, file_id, file_kind, caption):
+    if file_kind == "photo":
+        await bot.send_photo(user_id, file_id, caption=caption)
+    else:
+        await bot.send_document(user_id, file_id, caption=caption)
 
 
 async def support_page(update):
@@ -1332,7 +1397,7 @@ async def begin_order(update, context, sid):
         """
         SELECT id,category_key,name,description,subscription_duration,
                activation_time,price,delivery_mode,needs_email,needs_note,
-               needs_phone,file_id
+               needs_phone,file_id,file_kind,pre_purchase_message
         FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
         """,
         (sid,),
@@ -1369,10 +1434,14 @@ async def begin_order(update, context, sid):
     context.user_data["order_note_required"] = srv[9]
     context.user_data["order_phone_required"] = srv[10]
     context.user_data["order_category"] = srv[1]
+    context.user_data["order_file_id"] = srv[11] or ""
+    context.user_data["order_file_kind"] = srv[12] or ""
+    context.user_data["order_pre_purchase_message"] = srv[13] or ""
 
     if srv[8]:
         await update.callback_query.message.edit_text(
-            f"📧 **طلب {srv[2]}**\n\n"
+            f"📧 طلب {srv[2]}\n\n"
+            f"{(srv[13] or '').strip() + chr(10) + chr(10) if (srv[13] or '').strip() else ''}"
             "أرسل الإيميل الذي سجلت به في موقع الخدمة:\n\n"
             "⚠️ تأكد من صحة الإيميل قبل الإرسال.",
             reply_markup=InlineKeyboardMarkup([
@@ -1401,7 +1470,25 @@ async def begin_order(update, context, sid):
         )
         return
 
-    await finalize_customer_order(update, context)
+    await request_order_confirmation(update, context)
+
+
+async def request_order_confirmation(update, context):
+    """Show the service-specific instructions before the final irreversible balance charge."""
+    guidance = (context.user_data.get("order_pre_purchase_message") or "").strip()
+    if not guidance:
+        await finalize_customer_order(update, context)
+        return
+    context.user_data["order_confirm_required"] = True
+    await send_or_edit(
+        update,
+        f"ℹ️ **تعليمات قبل شراء الخدمة**\n\n{guidance}\n\n"
+        "بعد مراجعة التعليمات اضغط «متابعة الطلب» ليتم خصم الرصيد وإنشاء الطلب.",
+        InlineKeyboardMarkup([
+            [green_button("✅ متابعة الطلب", callback_data="buyconfirm:continue")],
+            [red_button("🚫 إلغاء", callback_data="flowcancel:main")],
+        ]),
+    )
 
 
 async def finalize_customer_order(update, context):
@@ -1496,7 +1583,7 @@ async def finalize_customer_order(update, context):
             f"🎉 **تم تنفيذ طلبك بنجاح!**\n\n"
             f"🛒 الخدمة: {context.user_data['order_service_name']}\n"
             f"💵 المبلغ: {money(price)}$\n\n"
-            "🎁 **بيانات الاشتراك/الكود:**\n"
+            "🎁 **بيانات التسليم/الكود:**\n"
             f"`{inventory_row[1]}`\n\n"
             "📦 تم تسجيل الطلب في سجل طلباتك.",
             InlineKeyboardMarkup([
@@ -1563,15 +1650,42 @@ async def finalize_customer_order(update, context):
 
     log_operation(uid, "manual_order", f"order={oid};service={sid};price={price}")
 
+    auto_delivered = False
+    file_id = context.user_data.get("order_file_id", "")
+    file_kind = context.user_data.get("order_file_kind", "")
+    if category == "free" and file_id and file_kind:
+        try:
+            await deliver_service_media(
+                context.bot,
+                uid,
+                file_id,
+                file_kind,
+                f"🎁 عرض مجاني: {context.user_data['order_service_name']}",
+            )
+            db_execute(
+                "UPDATE orders SET status='مكتمل ✅ - تم تسليم الملف',delivered_text=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                ("تم تسليم المرفق تلقائياً.", oid),
+            )
+            log_operation(uid, "free_media_delivered", f"order={oid};service={sid}")
+            auto_delivered = True
+        except TelegramError as exc:
+            log.warning("Automatic free media delivery failed for order %s: %s", oid, exc)
+
+    order_message = (
+        "🎁 تم تسليم ملف العرض المجاني تلقائياً.\n"
+        "📌 يمكنك متابعة العملية من «طلباتي»."
+        if auto_delivered else
+        "⏳ سيتم تنفيذ وتفعيل طلبك خلال أقل وقت ممكن.\n"
+        "📌 يمكنك متابعة حالة الطلب من «طلباتي».\n\n"
+        "🆘 إذا لم تستلم طلبك، استخدم زر التواصل مع الإدارة من تفاصيل الطلب."
+    )
     await send_or_edit(
         update,
         f"✅ **تم استلام طلبك بنجاح**\n\n"
         f"🛒 الخدمة: {context.user_data['order_service_name']}\n"
         f"🆔 رقم الطلب: **#{oid}**\n"
         f"💵 المبلغ: {money(price)}$\n\n"
-        "⏳ سيتم تنفيذ وتفعيل طلبك خلال أقل وقت ممكن.\n"
-        "📌 يمكنك متابعة حالة الطلب من «طلباتي».\n\n"
-        "🆘 إذا لم تستلم طلبك، استخدم زر التواصل مع الإدارة من تفاصيل الطلب.",
+        f"{order_message}",
         InlineKeyboardMarkup([
             [InlineKeyboardButton("📦 متابعة الطلب", callback_data=f"order:{oid}")],
             [InlineKeyboardButton("🆘 تواصل مع الإدارة", url=WHATSAPP_LINK)],
@@ -1677,7 +1791,7 @@ async def customer_text(update, context):
         if context.user_data.get("order_note_required"):
             await update.message.reply_text("📝 أرسل ملاحظتك للطلب، أو اكتب: لا يوجد")
             return
-        await finalize_customer_order(update, context)
+        await request_order_confirmation(update, context)
         return
 
     if context.user_data.get("order_phone_required") and "order_phone" not in context.user_data:
@@ -1685,13 +1799,13 @@ async def customer_text(update, context):
         if context.user_data.get("order_note_required"):
             await update.message.reply_text("📝 أرسل ملاحظتك للطلب، أو اكتب: لا يوجد")
             return
-        await finalize_customer_order(update, context)
+        await request_order_confirmation(update, context)
         return
 
     if context.user_data.get("order_note_required") and "order_note" not in context.user_data:
         note = update.message.text.strip()
         context.user_data["order_note"] = "" if note == "لا يوجد" else note
-        await finalize_customer_order(update, context)
+        await request_order_confirmation(update, context)
         return
 
 
@@ -1735,6 +1849,10 @@ async def admin_panel(update, context):
         [
             InlineKeyboardButton("📋 الطلبات", callback_data="adm:orders"),
             InlineKeyboardButton("👥 العملاء", callback_data="adm:users"),
+        ],
+        [
+            InlineKeyboardButton("💰 شحن رصيد عميل", callback_data="adm:credit_user"),
+            InlineKeyboardButton("🧾 سندات التحويل", callback_data="adm:topups"),
         ],
         [
             InlineKeyboardButton("📦 المخزون", callback_data="adm:inventory"),
@@ -1786,6 +1904,7 @@ async def admin_callback(update, context):
             "price": "💵 أرسل السعر الجديد بالأرقام فقط، مثال: 5.50",
             "duration": "⏳ أرسل مدة الاشتراك الجديدة، أو اكتب: غير محدد",
             "activation": "⚡ أرسل مدة التفعيل أو التسليم الجديدة، أو اكتب: غير محدد",
+            "pre_message": "💬 أرسل الرسالة التي تظهر للعميل قبل شراء هذه الخدمة. يمكنك تضمين رابط موقع الأداة.",
         }
         if field not in prompts:
             await q.answer("❌ حقل غير صالح.", show_alert=True)
@@ -1798,6 +1917,19 @@ async def admin_callback(update, context):
         })
         await q.message.edit_text(
             prompts[field],
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data=f"adm:service:{sid}")],
+                *admin_navigation_rows("adm:services", "الخدمات"),
+            ]),
+        )
+    elif data.startswith("attachfile:"):
+        sid = int(data.split(":", 1)[1])
+        context.user_data.clear()
+        context.user_data["admin_state"] = "service_file"
+        context.user_data["service_file_id"] = sid
+        await q.message.edit_text(
+            "📎 أرسل الآن صورة أو ملفاً لتسليمه تلقائياً مع هذه الخدمة.\n\n"
+            "يفضّل استخدام هذا الخيار لخدمات وعروض القسم المجاني. لإلغاء العملية اضغط الزر أدناه.",
             reply_markup=InlineKeyboardMarkup([
                 [red_button("🚫 إلغاء", callback_data=f"adm:service:{sid}")],
                 *admin_navigation_rows("adm:services", "الخدمات"),
@@ -1856,6 +1988,16 @@ async def admin_callback(update, context):
         await admin_order_page(update, int(data.split(":")[1]))
     elif data == "users":
         await admin_users(update)
+    elif data == "credit_user":
+        context.user_data.clear()
+        context.user_data["admin_state"] = "credit_user_id"
+        await q.message.edit_text(
+            "💰 أرسل آيدي العميل الذي تريد شحن رصيده.\n\nلن يتم الشحن إلا بعد التحقق من العميل ثم إدخال المبلغ.",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:home")],
+                *admin_navigation_rows(),
+            ]),
+        )
     elif data == "inventory":
         context.user_data.clear()
         await admin_inventory(update)
@@ -2092,7 +2234,8 @@ async def admin_service_detail(update, sid):
     row = db_execute(
         """
         SELECT id,name,category_key,description,subscription_duration,activation_time,
-               price,delivery_mode,needs_email,needs_note,needs_phone,COALESCE(active,TRUE),file_id
+               price,delivery_mode,needs_email,needs_note,needs_phone,COALESCE(active,TRUE),file_id,
+               file_kind,pre_purchase_message
         FROM services WHERE id=%s
         """,
         (sid,),
@@ -2117,8 +2260,8 @@ async def admin_service_detail(update, sid):
         f"📌 الاسم: **{row[1]}**\n"
         f"📂 القسم: `{row[2]}`\n"
         f"📝 الوصف: {row[3] or 'غير محدد'}\n"
-        f"⏳ مدة الاشتراك: {row[4] or 'غير محددة'}\n"
-        f"⚡ مدة التفعيل: {row[5] or 'غير محددة'}\n"
+        f"⏳ {'مدة الإيجار' if row[2] == 'rentals' else 'مدة الاشتراك'}: {row[4] or 'غير محددة'}\n"
+        f"⚡ {'وقت تسليم بيانات الإيجار' if row[2] == 'rentals' else 'مدة التفعيل'}: {row[5] or 'غير محددة'}\n"
         f"💵 السعر: **{money(row[6])}$**\n"
         f"🚚 طريقة التسليم: {mode}\n"
         f"📦 الأكواد المتاحة: {stock}\n"
@@ -2126,6 +2269,8 @@ async def admin_service_detail(update, sid):
         f"📝 طلب ملاحظة: {'نعم ✅' if row[9] else 'لا ❌'}\n"
         f"📱 طلب رقم هاتف: {'نعم ✅' if row[10] else 'لا ❌'}\n"
         f"📁 ملف مرفق: {'موجود ✅' if row[12] else 'لا يوجد'}\n"
+        f"📎 نوع المرفق: {row[13] or '—'}\n"
+        f"💬 رسالة قبل الشراء: {row[14] or 'لا توجد'}\n"
         f"👁️ الحالة: {status}"
     )
     keyboard = [
@@ -2134,7 +2279,9 @@ async def admin_service_detail(update, sid):
         [green_button("💵 تعديل السعر", callback_data=f"adm:serviceedit:{sid}:price"),
          green_button("⏳ تعديل المدة", callback_data=f"adm:serviceedit:{sid}:duration")],
         [green_button("⚡ تعديل التفعيل", callback_data=f"adm:serviceedit:{sid}:activation"),
-         green_button("📦 إضافة أكواد", callback_data=f"adm:addstock:{sid}")],
+         green_button("💬 رسالة قبل الشراء", callback_data=f"adm:serviceedit:{sid}:pre_message")],
+        [green_button("📦 إضافة أكواد", callback_data=f"adm:addstock:{sid}"),
+         green_button("📎 رفع ملف/صورة", callback_data=f"adm:attachfile:{sid}")],
         [green_button("⚡ الأدوات", callback_data=f"adm:service_category:{sid}:digital"),
          green_button("🔵 الاشتراكات", callback_data=f"adm:service_category:{sid}:subscriptions")],
         [green_button("🔧 الإيجار", callback_data=f"adm:service_category:{sid}:rentals"),
@@ -2172,36 +2319,41 @@ async def admin_add_service_prompt(update, context):
     )
 
 
-async def admin_stats(update):
+def safe_stat_value(query, default=0, params=()):
+    """Return a statistic without making the admin panel unavailable on legacy schemas."""
     try:
-        users = db_execute("SELECT COUNT(*) FROM users", fetch=True)[0]
-        orders = db_execute("SELECT COUNT(*) FROM orders", fetch=True)[0]
-        services = db_execute("SELECT COUNT(*) FROM services WHERE COALESCE(active,TRUE)=TRUE", fetch=True)[0]
-        stock = db_execute("SELECT COUNT(*) FROM inventory WHERE COALESCE(is_sold,FALSE)=FALSE", fetch=True)[0]
-        revenue = db_execute(
-            "SELECT COALESCE(SUM(total),0) FROM orders WHERE COALESCE(status,'') NOT LIKE 'ملغي%'",
-            fetch=True,
-        )[0]
+        row = db_execute(query, params, fetch=True)
+        return row[0] if row and row[0] is not None else default
     except Exception as exc:
-        log.exception("Unable to load admin statistics: %s", exc)
-        await send_or_edit(
-            update,
-            "⚠️ تعذر تحميل الإحصائيات مؤقتاً. أعد نشر آخر ملف bot.py لتشغيل ترقية قاعدة البيانات ثم جرّب مجدداً.",
-            InlineKeyboardMarkup(admin_navigation_rows()),
-        )
-        return
+        log.warning("Statistics query skipped: %s | %s", query.splitlines()[0][:80], exc)
+        return default
+
+
+async def admin_stats(update):
+    users = safe_stat_value("SELECT COUNT(*) FROM users")
+    orders = safe_stat_value("SELECT COUNT(*) FROM orders")
+    services = safe_stat_value("SELECT COUNT(*) FROM services")
+    stock = safe_stat_value("SELECT COUNT(*) FROM inventory")
+    revenue = safe_stat_value("SELECT COALESCE(SUM(total),0) FROM orders")
+    approved = safe_stat_value("SELECT COUNT(*) FROM orders WHERE status LIKE 'مكتمل%'")
+    pending = safe_stat_value("SELECT COUNT(*) FROM orders WHERE status LIKE 'قيد التنفيذ%'")
     text = (
         "📊 **إحصائيات المتجر**\n\n"
         f"👥 العملاء: {users}\n"
-        f"📦 الطلبات: {orders}\n"
-        f"🛒 الخدمات النشطة: {services}\n"
-        f"🔑 المخزون المتوفر: {stock}\n"
+        f"📦 جميع الطلبات: {orders}\n"
+        f"✅ الطلبات المكتملة: {approved}\n"
+        f"⏳ الطلبات قيد التنفيذ: {pending}\n"
+        f"🛒 الخدمات المسجلة: {services}\n"
+        f"🔑 عناصر المخزون المسجلة: {stock}\n"
         f"💰 إجمالي المبيعات المسجلة: {money(revenue)}$"
     )
     await send_or_edit(
         update,
         text,
-        InlineKeyboardMarkup(admin_navigation_rows()),
+        InlineKeyboardMarkup([
+            [green_button("🔄 تحديث الإحصائيات", callback_data="adm:stats")],
+            *admin_navigation_rows(),
+        ]),
     )
 
 
@@ -2821,12 +2973,80 @@ async def admin_approve_order(update, context, oid):
 # Admin text workflow
 # ---------------------------------------------------------------------------
 
+async def credit_user_balance(user_id, amount):
+    """Manually credit an existing customer once within a locked database transaction."""
+    conn = DB_POOL.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name,balance FROM users WHERE user_id=%s FOR UPDATE", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            cur.execute("UPDATE users SET balance=balance+%s WHERE user_id=%s", (amount, user_id))
+            new_balance = Decimal(str(row[1])) + Decimal(str(amount))
+        conn.commit()
+        return row[0], new_balance
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        DB_POOL.putconn(conn)
+
+
 async def admin_text(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
 
     state = context.user_data.get("admin_state")
     text = update.message.text.strip()
+
+    if state == "credit_user_id":
+        if not text.isdigit() or int(text) <= 0:
+            await update.message.reply_text("❌ أرسل آيدي تيليجرام رقمي صحيح للعميل.")
+            return
+        row = get_user(int(text))
+        if not row:
+            await update.message.reply_text("❌ لا يوجد عميل بهذا الآيدي. يجب أن يبدأ العميل البوت مرة واحدة أولاً.")
+            return
+        context.user_data["credit_target_user_id"] = int(text)
+        context.user_data["admin_state"] = "credit_user_amount"
+        await update.message.reply_text(
+            f"👤 العميل: {row[1]}\n💵 رصيده الحالي: {money(row[2])}$\n\nأرسل الآن مبلغ الشحن بالأرقام فقط."
+        )
+        return
+
+    if state == "credit_user_amount":
+        try:
+            amount = Decimal(text)
+            if amount <= 0:
+                raise InvalidOperation
+        except Exception:
+            await update.message.reply_text("❌ أرسل مبلغاً رقمياً أكبر من صفر.")
+            return
+        target_user_id = context.user_data.get("credit_target_user_id")
+        credited = await credit_user_balance(target_user_id, amount)
+        if not credited:
+            context.user_data.clear()
+            await update.message.reply_text("❌ العميل غير موجود أو تعذر الشحن.")
+            return
+        name, new_balance = credited
+        log_operation(target_user_id, "admin_manual_credit", f"amount={money(amount)}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text(
+            f"✅ تم شحن حساب {name} بمبلغ {money(amount)}$.\n💵 الرصيد الجديد: {money(new_balance)}$"
+        )
+        try:
+            await context.bot.send_message(
+                target_user_id,
+                f"💰 **تم شحن رصيد حسابك من الإدارة**\n\n"
+                f"المبلغ المضاف: **{money(amount)}$**\n"
+                f"رصيدك الجديد: **{money(new_balance)}$**",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except TelegramError as exc:
+            log.warning("Manual credit notification failed for %s: %s", target_user_id, exc)
+        return
 
     if state == "maintenance_custom_message":
         if not text:
@@ -2902,6 +3122,7 @@ async def admin_text(update, context):
             "description": "description",
             "duration": "subscription_duration",
             "activation": "activation_time",
+            "pre_message": "pre_purchase_message",
         }
         if field == "price":
             try:
@@ -3260,7 +3481,7 @@ def build_application():
     application.add_handler(
         CallbackQueryHandler(
             callback_router,
-            pattern=r"^(check_sub|main|flowcancel:|cat:|service:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
+            pattern=r"^(check_sub|main|flowcancel:|cat:|service:|buyconfirm:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
         )
     )
 
@@ -3275,6 +3496,7 @@ def build_application():
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_router)
     )
     application.add_handler(MessageHandler(filters.PHOTO, receipt_photo_handler))
+    application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
 
     return application
 
