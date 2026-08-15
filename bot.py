@@ -27,6 +27,8 @@ import logging
 import asyncio
 import threading
 import re
+from contextvars import ContextVar
+from functools import wraps
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
@@ -346,6 +348,22 @@ def init_db():
         "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS reviewed_by BIGINT",
         "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP",
         "ALTER TABLE topup_receipts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        # توافق قواعد البيانات السابقة لشاشة قنوات الاشتراك الإجباري.
+        "ALTER TABLE forced_channels ADD COLUMN IF NOT EXISTS id BIGSERIAL",
+        "ALTER TABLE forced_channels ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'قناة'",
+        "ALTER TABLE forced_channels ADD COLUMN IF NOT EXISTS link TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE forced_channels ADD COLUMN IF NOT EXISTS chat_id TEXT DEFAULT ''",
+        "ALTER TABLE forced_channels ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
+        "UPDATE forced_channels SET id=DEFAULT WHERE id IS NULL",
+        "UPDATE forced_channels SET active=TRUE WHERE active IS NULL",
+        # توافق سجل العمليات مع القواعد القديمة من دون حذف أي سجل موجود.
+        "ALTER TABLE operation_log ADD COLUMN IF NOT EXISTS id BIGSERIAL",
+        "ALTER TABLE operation_log ADD COLUMN IF NOT EXISTS user_id BIGINT",
+        "ALTER TABLE operation_log ADD COLUMN IF NOT EXISTS admin_id BIGINT",
+        "ALTER TABLE operation_log ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE operation_log ADD COLUMN IF NOT EXISTS details TEXT DEFAULT ''",
+        "ALTER TABLE operation_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "UPDATE operation_log SET id=DEFAULT WHERE id IS NULL",
     ]
     for sql in migrations:
         db_execute(sql)
@@ -455,26 +473,49 @@ AUTO_MAINTENANCE_MESSAGE = (
 )
 
 
-def green_button(*args, **kwargs):
-    """Create a green inline button, while retaining compatibility with older libraries."""
+# لا يرسل البوت ألواناً خاصة افتراضياً؛ تظهر الأزرار بنمط تطبيق تيليجرام العادي.
+# المستخدم الذي يعلن Bot API أنه Premium فقط يحصل على تلميحات النجاح/الخطر الاختيارية.
+BUTTON_COLORS_ENABLED = ContextVar("button_colors_enabled", default=False)
+
+
+def user_prefers_colored_buttons(user):
+    return bool(getattr(user, "is_premium", False))
+
+
+def themed_handler(handler):
+    """Apply the optional button theme only for the current Premium user update."""
+    @wraps(handler)
+    async def wrapped(update, context, *args, **kwargs):
+        token = BUTTON_COLORS_ENABLED.set(
+            user_prefers_colored_buttons(getattr(update, "effective_user", None))
+        )
+        try:
+            return await handler(update, context, *args, **kwargs)
+        finally:
+            BUTTON_COLORS_ENABLED.reset(token)
+    return wrapped
+
+
+def styled_button(style, *args, **kwargs):
     plain_kwargs = dict(kwargs)
+    if not BUTTON_COLORS_ENABLED.get():
+        return TelegramInlineKeyboardButton(*args, **plain_kwargs)
     styled_kwargs = dict(kwargs)
-    styled_kwargs["style"] = "success"
+    styled_kwargs["style"] = style
     try:
         return TelegramInlineKeyboardButton(*args, **styled_kwargs)
     except TypeError:
         return TelegramInlineKeyboardButton(*args, **plain_kwargs)
+
+
+def green_button(*args, **kwargs):
+    """Use green only when the recipient is a Premium user; otherwise use native styling."""
+    return styled_button("success", *args, **kwargs)
 
 
 def red_button(*args, **kwargs):
-    """Create a red inline button for cancel, back, and destructive actions."""
-    plain_kwargs = dict(kwargs)
-    styled_kwargs = dict(kwargs)
-    styled_kwargs["style"] = "danger"
-    try:
-        return TelegramInlineKeyboardButton(*args, **styled_kwargs)
-    except TypeError:
-        return TelegramInlineKeyboardButton(*args, **plain_kwargs)
+    """Use red only when the recipient is a Premium user; otherwise use native styling."""
+    return styled_button("danger", *args, **kwargs)
 
 
 def admin_navigation_rows(back_callback="adm:home", back_label="لوحة المشرف"):
@@ -2214,10 +2255,19 @@ async def reject_topup_receipt(context, receipt_id, note):
 
 
 async def admin_channels(update):
-    rows = db_execute(
-        "SELECT id,name,link,chat_id,active FROM forced_channels ORDER BY id",
-        fetchall=True,
-    )
+    try:
+        rows = db_execute(
+            "SELECT id,name,link,chat_id,active FROM forced_channels ORDER BY id",
+            fetchall=True,
+        )
+    except Exception as exc:
+        log.exception("Unable to open forced-channel administration: %s", exc)
+        await send_or_edit(
+            update,
+            "⚠️ تعذر فتح شاشة القنوات مؤقتاً. أعد نشر آخر ملف bot.py لتشغيل ترقية قاعدة البيانات، ثم جرّب مجدداً.",
+            InlineKeyboardMarkup(admin_navigation_rows()),
+        )
+        return
     text = "📢 **قنوات الاشتراك الإجباري**\n\n"
     keyboard = [
         [InlineKeyboardButton("➕ إضافة قناة", callback_data="adm:add_channel")],
@@ -2333,13 +2383,22 @@ async def admin_maintenance(update):
 
 
 async def admin_logs(update):
-    rows = db_execute(
-        """
-        SELECT action,details,created_at
-        FROM operation_log ORDER BY id DESC LIMIT 25
-        """,
-        fetchall=True,
-    )
+    try:
+        rows = db_execute(
+            """
+            SELECT action,details,created_at
+            FROM operation_log ORDER BY id DESC LIMIT 25
+            """,
+            fetchall=True,
+        )
+    except Exception as exc:
+        log.exception("Unable to open operation log: %s", exc)
+        await send_or_edit(
+            update,
+            "⚠️ تعذر فتح سجل العمليات مؤقتاً. أعد نشر آخر ملف bot.py لتشغيل ترقية قاعدة البيانات، ثم جرّب مجدداً.",
+            InlineKeyboardMarkup(admin_navigation_rows()),
+        )
+        return
     text = "📝 **آخر العمليات**\n\n"
     for action, details, created in rows:
         text += f"▪️ {created}\n{action}: {details}\n\n"
@@ -2935,14 +2994,14 @@ async def cancel(update, context):
 def build_application():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("admin", admin_command))
-    application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CommandHandler("start", themed_handler(start)))
+    application.add_handler(CommandHandler("admin", themed_handler(admin_command)))
+    application.add_handler(CommandHandler("cancel", themed_handler(cancel)))
 
     # Customer card flow.
     application.add_handler(
         CallbackQueryHandler(
-            customer_card_start,
+            themed_handler(customer_card_start),
             pattern=r"^customer_card$",
         )
     )
@@ -2950,22 +3009,26 @@ def build_application():
     # Main callbacks.
     application.add_handler(
         CallbackQueryHandler(
-            callback_router,
+            themed_handler(callback_router),
             pattern=r"^(check_sub|main|flowcancel:|cat:|service:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
         )
     )
 
     # Admin/customer text router.
     async def text_router(update, context):
-        if update.effective_user.id == ADMIN_ID and context.user_data.get("admin_state"):
-            await admin_text(update, context)
-            return
-        await customer_text(update, context)
+        token = BUTTON_COLORS_ENABLED.set(user_prefers_colored_buttons(update.effective_user))
+        try:
+            if update.effective_user.id == ADMIN_ID and context.user_data.get("admin_state"):
+                await admin_text(update, context)
+                return
+            await customer_text(update, context)
+        finally:
+            BUTTON_COLORS_ENABLED.reset(token)
 
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_router)
     )
-    application.add_handler(MessageHandler(filters.PHOTO, receipt_photo_handler))
+    application.add_handler(MessageHandler(filters.PHOTO, themed_handler(receipt_photo_handler)))
 
     return application
 
