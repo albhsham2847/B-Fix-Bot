@@ -718,35 +718,47 @@ def valid_custom_button_action(action):
     return action in ALLOWED_CUSTOM_BUTTON_CALLBACKS or action.startswith(("https://", "http://"))
 
 
+def visible_main_button(key, fallback_text, callback_data=None, url=None):
+    """Keep fixed core routes intact while allowing only their label/visibility to be managed."""
+    text, _stored_action, visible = button_config(key, fallback_text, callback_data or url or "")
+    if not visible:
+        return None
+    if url:
+        return green_button(text, url=url)
+    return green_button(text, callback_data=callback_data)
+
+
 def main_keyboard():
+    # لا تعتمد إجراءات الأقسام على قيمة قابلة للتعديل في قاعدة البيانات؛
+    # لذلك تبقى الأزرار الأساسية عاملة حتى لو كانت بيانات الإصدارات القديمة ناقصة.
     keyboard = []
     add_button_row(
         keyboard,
-        configured_main_button("cat_digital", "⚡ الأدوات والبوكسات", "cat:digital"),
-        configured_main_button("cat_subscriptions", "🔵 الاشتراكات", "cat:subscriptions"),
+        visible_main_button("cat_digital", "⚡ الأدوات والبوكسات", callback_data="cat:digital"),
+        visible_main_button("cat_subscriptions", "🔵 الاشتراكات", callback_data="cat:subscriptions"),
     )
-    add_button_row(keyboard, configured_main_button("cat_rentals", "🔧 إيجار الأدوات والبوكسات", "cat:rentals"))
+    add_button_row(keyboard, visible_main_button("cat_rentals", "🔧 إيجار الأدوات والبوكسات", callback_data="cat:rentals"))
     add_button_row(
         keyboard,
-        configured_main_button("cat_vip", "💎 عروض VIP", "cat:vip"),
-        configured_main_button("cat_free", "🎁 عروض مجانية", "cat:free"),
-    )
-    add_button_row(
-        keyboard,
-        configured_main_button("my_orders", "📦 طلباتي", "orders"),
-        configured_main_button("my_profile", "👤 حسابي", "profile"),
+        visible_main_button("cat_vip", "💎 عروض VIP", callback_data="cat:vip"),
+        visible_main_button("cat_free", "🎁 عروض مجانية", callback_data="cat:free"),
     )
     add_button_row(
         keyboard,
-        configured_main_button("fund_account", "💰 تغذية حسابك", "fund"),
-        configured_main_button("support", "🆘 الدعم", "support"),
+        visible_main_button("my_orders", "📦 طلباتي", callback_data="orders"),
+        visible_main_button("my_profile", "👤 حسابي", callback_data="profile"),
     )
     add_button_row(
         keyboard,
-        configured_main_button("channel_link", "📢 قناة البوت", FORCED_CHANNEL_LINK),
-        configured_main_button("whatsapp_link", "🌐 واتساب", WHATSAPP_LINK),
+        visible_main_button("fund_account", "💰 تغذية حسابك", callback_data="fund"),
+        visible_main_button("support", "🆘 الدعم", callback_data="support"),
     )
-    add_button_row(keyboard, configured_main_button("about", "ℹ️ عن المتجر", "about"))
+    add_button_row(
+        keyboard,
+        visible_main_button("channel_link", "📢 قناة البوت", url=FORCED_CHANNEL_LINK),
+        visible_main_button("whatsapp_link", "🌐 واتساب", url=WHATSAPP_LINK),
+    )
+    add_button_row(keyboard, visible_main_button("about", "ℹ️ عن المتجر", callback_data="about"))
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -926,12 +938,17 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Customer sections
 # ---------------------------------------------------------------------------
 
+CATEGORY_INFO = {
+    "digital": ("⚡ الأدوات والبوكسات", "أدوات وبوكسات رقمية وخدمات تفعيل."),
+    "subscriptions": ("🔵 الاشتراكات", "اشتراكات وخدمات دورية."),
+    "rentals": ("🔧 إيجار الأدوات", "خدمات إيجار الأدوات والبوكسات."),
+    "vip": ("💎 عروض VIP", "خدمات وعروض VIP."),
+    "free": ("🎁 العروض المجانية", "العروض والخدمات المجانية."),
+}
+
+
 async def show_category(update, category):
-    cat = db_execute(
-        "SELECT title,description FROM categories WHERE LOWER(TRIM(key))=%s AND COALESCE(active,TRUE)=TRUE",
-        (category,),
-        fetch=True,
-    )
+    cat = CATEGORY_INFO.get(category)
     if not cat:
         await send_or_edit(
             update,
@@ -940,17 +957,26 @@ async def show_category(update, category):
         )
         return
 
-    services = db_execute(
-        """
-        SELECT id,name,price,delivery_mode,needs_email,needs_phone
-        FROM services
-        WHERE LOWER(TRIM(COALESCE(category_key,'')))=%s
-          AND COALESCE(active,TRUE)=TRUE
-        ORDER BY id DESC
-        """,
-        (category,),
-        fetchall=True,
-    )
+    try:
+        services = db_execute(
+            """
+            SELECT id,name,price,delivery_mode,needs_email,needs_phone
+            FROM services
+            WHERE LOWER(TRIM(COALESCE(category_key,'')))=%s
+              AND COALESCE(active,TRUE)=TRUE
+            ORDER BY id DESC
+            """,
+            (category,),
+            fetchall=True,
+        )
+    except Exception as exc:
+        log.exception("Unable to load category %s: %s", category, exc)
+        await send_or_edit(
+            update,
+            "⚠️ تعذر تحميل خدمات هذا القسم مؤقتاً. جرّب مرة أخرى بعد اكتمال إعادة النشر.",
+            InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
+        )
+        return
 
     if not services:
         await send_or_edit(
@@ -1703,7 +1729,7 @@ async def admin_panel(update, context):
     )
     keyboard = [
         [
-            InlineKeyboardButton("📦 الخدمات", callback_data="adm:services"),
+            InlineKeyboardButton("🛠️ تعديل الخدمات", callback_data="adm:services"),
             InlineKeyboardButton("📊 الإحصائيات", callback_data="adm:stats"),
         ],
         [
@@ -1716,7 +1742,7 @@ async def admin_panel(update, context):
         ],
         [
             InlineKeyboardButton("📢 القنوات", callback_data="adm:channels"),
-            InlineKeyboardButton("🎛️ الأزرار", callback_data="adm:buttons"),
+            InlineKeyboardButton("🎛️ أزرار الشاشة", callback_data="adm:buttons"),
         ],
         [
             InlineKeyboardButton("💳 طرق الدفع", callback_data="adm:payments"),
@@ -1750,6 +1776,60 @@ async def admin_callback(update, context):
         await admin_services(update)
     elif data == "service_menu":
         await admin_service_menu(update)
+    elif data.startswith("service:"):
+        await admin_service_detail(update, int(data.split(":", 1)[1]))
+    elif data.startswith("serviceedit:"):
+        _prefix, sid, field = data.split(":", 2)
+        prompts = {
+            "name": "✏️ أرسل الاسم الجديد للخدمة:",
+            "description": "📝 أرسل الوصف الجديد للخدمة:",
+            "price": "💵 أرسل السعر الجديد بالأرقام فقط، مثال: 5.50",
+            "duration": "⏳ أرسل مدة الاشتراك الجديدة، أو اكتب: غير محدد",
+            "activation": "⚡ أرسل مدة التفعيل أو التسليم الجديدة، أو اكتب: غير محدد",
+        }
+        if field not in prompts:
+            await q.answer("❌ حقل غير صالح.", show_alert=True)
+            return
+        context.user_data.clear()
+        context.user_data.update({
+            "admin_state": "service_edit_field",
+            "service_edit_id": int(sid),
+            "service_edit_field": field,
+        })
+        await q.message.edit_text(
+            prompts[field],
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data=f"adm:service:{sid}")],
+                *admin_navigation_rows("adm:services", "الخدمات"),
+            ]),
+        )
+    elif data.startswith("service_category:"):
+        _prefix, sid, category = data.split(":", 2)
+        if category not in CATEGORY_INFO:
+            await q.answer("❌ قسم غير صالح.", show_alert=True)
+            return
+        db_execute("UPDATE services SET category_key=%s WHERE id=%s", (category, int(sid)))
+        log_operation(None, "service_category_updated", f"service={sid};category={category}", ADMIN_ID)
+        await admin_service_detail(update, int(sid))
+    elif data.startswith("service_mode:"):
+        _prefix, sid, mode = data.split(":", 2)
+        if mode not in {"manual", "stock"}:
+            await q.answer("❌ طريقة تسليم غير صالحة.", show_alert=True)
+            return
+        db_execute("UPDATE services SET delivery_mode=%s WHERE id=%s", (mode, int(sid)))
+        log_operation(None, "service_mode_updated", f"service={sid};mode={mode}", ADMIN_ID)
+        await admin_service_detail(update, int(sid))
+    elif data.startswith("service_toggle:"):
+        _prefix, sid, field = data.split(":", 2)
+        if field not in {"needs_email", "needs_note", "needs_phone", "active"}:
+            await q.answer("❌ إعداد غير صالح.", show_alert=True)
+            return
+        db_execute(
+            f"UPDATE services SET {field}=NOT COALESCE({field},FALSE) WHERE id=%s",
+            (int(sid),),
+        )
+        log_operation(None, "service_setting_toggled", f"service={sid};setting={field}", ADMIN_ID)
+        await admin_service_detail(update, int(sid))
     elif data == "add_service":
         await admin_add_service_prompt(update, context)
     elif data.startswith("newservice_category:"):
@@ -1981,29 +2061,24 @@ async def admin_callback(update, context):
 async def admin_services(update):
     rows = db_execute(
         """
-        SELECT id,name,category_key,price,delivery_mode,active
+        SELECT id,name,category_key,price,delivery_mode,COALESCE(active,TRUE)
         FROM services ORDER BY id DESC
         """,
         fetchall=True,
     )
-    text = "📦 **إدارة الخدمات**\n\n"
-    keyboard = [
-        [green_button("➕ إضافة خدمة", callback_data="adm:add_service")]
-    ]
+    text = (
+        "🛠️ **إدارة الخدمات**\n\n"
+        "اضغط اسم أي خدمة لفتح لوحة تفاصيلها وتعديل بياناتها.\n\n"
+    )
+    keyboard = [[green_button("➕ إضافة خدمة", callback_data="adm:add_service")]]
     if not rows:
-        text += "لا توجد خدمات."
+        text += "لا توجد خدمات مضافة حتى الآن."
     else:
         for sid, name, cat, price, mode, active in rows:
-            text += f"▪️ #{sid} {name} — {money(price)}$ — {cat}\n"
+            status = "🟢 ظاهرة" if active else "🔴 مؤرشفة"
+            text += f"▪️ #{sid} {name} — {money(price)}$ — {status}\n"
             keyboard.append([
-                InlineKeyboardButton(
-                    f"🗑️ حذف #{sid} {name}",
-                    callback_data=f"adm:delete_service:{sid}",
-                ),
-                InlineKeyboardButton(
-                    f"📦 مخزون #{sid}",
-                    callback_data=f"adm:addstock:{sid}",
-                ),
+                green_button(f"📦 #{sid} {name[:45]}", callback_data=f"adm:service:{sid}")
             ])
     keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
@@ -2011,6 +2086,71 @@ async def admin_services(update):
 
 async def admin_service_menu(update):
     await admin_services(update)
+
+
+async def admin_service_detail(update, sid):
+    row = db_execute(
+        """
+        SELECT id,name,category_key,description,subscription_duration,activation_time,
+               price,delivery_mode,needs_email,needs_note,needs_phone,COALESCE(active,TRUE),file_id
+        FROM services WHERE id=%s
+        """,
+        (sid,),
+        fetch=True,
+    )
+    if not row:
+        await send_or_edit(
+            update,
+            "❌ الخدمة غير موجودة أو تم حذفها سابقاً.",
+            InlineKeyboardMarkup(admin_navigation_rows("adm:services", "الخدمات")),
+        )
+        return
+    stock = db_execute(
+        "SELECT COUNT(*) FROM inventory WHERE service_id=%s AND COALESCE(is_sold,FALSE)=FALSE",
+        (sid,),
+        fetch=True,
+    )[0]
+    status = "🟢 ظاهرة للعميل" if row[11] else "🔴 مؤرشفة ومخفية"
+    mode = "📦 تسليم من المخزون" if row[7] == "stock" else "🛠️ تنفيذ يدوي"
+    text = (
+        f"🧩 **تفاصيل الخدمة #{row[0]}**\n\n"
+        f"📌 الاسم: **{row[1]}**\n"
+        f"📂 القسم: `{row[2]}`\n"
+        f"📝 الوصف: {row[3] or 'غير محدد'}\n"
+        f"⏳ مدة الاشتراك: {row[4] or 'غير محددة'}\n"
+        f"⚡ مدة التفعيل: {row[5] or 'غير محددة'}\n"
+        f"💵 السعر: **{money(row[6])}$**\n"
+        f"🚚 طريقة التسليم: {mode}\n"
+        f"📦 الأكواد المتاحة: {stock}\n"
+        f"📧 طلب إيميل: {'نعم ✅' if row[8] else 'لا ❌'}\n"
+        f"📝 طلب ملاحظة: {'نعم ✅' if row[9] else 'لا ❌'}\n"
+        f"📱 طلب رقم هاتف: {'نعم ✅' if row[10] else 'لا ❌'}\n"
+        f"📁 ملف مرفق: {'موجود ✅' if row[12] else 'لا يوجد'}\n"
+        f"👁️ الحالة: {status}"
+    )
+    keyboard = [
+        [green_button("✏️ تعديل الاسم", callback_data=f"adm:serviceedit:{sid}:name"),
+         green_button("📝 تعديل الوصف", callback_data=f"adm:serviceedit:{sid}:description")],
+        [green_button("💵 تعديل السعر", callback_data=f"adm:serviceedit:{sid}:price"),
+         green_button("⏳ تعديل المدة", callback_data=f"adm:serviceedit:{sid}:duration")],
+        [green_button("⚡ تعديل التفعيل", callback_data=f"adm:serviceedit:{sid}:activation"),
+         green_button("📦 إضافة أكواد", callback_data=f"adm:addstock:{sid}")],
+        [green_button("⚡ الأدوات", callback_data=f"adm:service_category:{sid}:digital"),
+         green_button("🔵 الاشتراكات", callback_data=f"adm:service_category:{sid}:subscriptions")],
+        [green_button("🔧 الإيجار", callback_data=f"adm:service_category:{sid}:rentals"),
+         green_button("💎 VIP", callback_data=f"adm:service_category:{sid}:vip"),
+         green_button("🎁 مجاني", callback_data=f"adm:service_category:{sid}:free")],
+        [green_button("🛠️ يدوي", callback_data=f"adm:service_mode:{sid}:manual"),
+         green_button("📦 مخزون", callback_data=f"adm:service_mode:{sid}:stock")],
+        [green_button("📧 تبديل الإيميل", callback_data=f"adm:service_toggle:{sid}:needs_email"),
+         green_button("📝 تبديل الملاحظة", callback_data=f"adm:service_toggle:{sid}:needs_note")],
+        [green_button("📱 تبديل الهاتف", callback_data=f"adm:service_toggle:{sid}:needs_phone"),
+         red_button("👁️ إخفاء/إظهار", callback_data=f"adm:service_toggle:{sid}:active")],
+        [red_button("🗑️ أرشفة الخدمة", callback_data=f"adm:delete_service:{sid}")],
+        [red_button("↩️ كل الخدمات", callback_data="adm:services")],
+        *admin_navigation_rows(),
+    ]
+    await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
 async def admin_add_service_prompt(update, context):
@@ -2033,14 +2173,23 @@ async def admin_add_service_prompt(update, context):
 
 
 async def admin_stats(update):
-    users = db_execute("SELECT COUNT(*) FROM users", fetch=True)[0]
-    orders = db_execute("SELECT COUNT(*) FROM orders", fetch=True)[0]
-    services = db_execute("SELECT COUNT(*) FROM services WHERE active=TRUE", fetch=True)[0]
-    stock = db_execute("SELECT COUNT(*) FROM inventory WHERE is_sold=FALSE", fetch=True)[0]
-    revenue = db_execute(
-        "SELECT COALESCE(SUM(total),0) FROM orders WHERE status NOT LIKE 'ملغي%'",
-        fetch=True,
-    )[0]
+    try:
+        users = db_execute("SELECT COUNT(*) FROM users", fetch=True)[0]
+        orders = db_execute("SELECT COUNT(*) FROM orders", fetch=True)[0]
+        services = db_execute("SELECT COUNT(*) FROM services WHERE COALESCE(active,TRUE)=TRUE", fetch=True)[0]
+        stock = db_execute("SELECT COUNT(*) FROM inventory WHERE COALESCE(is_sold,FALSE)=FALSE", fetch=True)[0]
+        revenue = db_execute(
+            "SELECT COALESCE(SUM(total),0) FROM orders WHERE COALESCE(status,'') NOT LIKE 'ملغي%'",
+            fetch=True,
+        )[0]
+    except Exception as exc:
+        log.exception("Unable to load admin statistics: %s", exc)
+        await send_or_edit(
+            update,
+            "⚠️ تعذر تحميل الإحصائيات مؤقتاً. أعد نشر آخر ملف bot.py لتشغيل ترقية قاعدة البيانات ثم جرّب مجدداً.",
+            InlineKeyboardMarkup(admin_navigation_rows()),
+        )
+        return
     text = (
         "📊 **إحصائيات المتجر**\n\n"
         f"👥 العملاء: {users}\n"
@@ -2743,6 +2892,40 @@ async def admin_text(update, context):
         log_operation(user_id, "topup_rejected", f"receipt={receipt_id};note={note}", ADMIN_ID)
         context.user_data.clear()
         await update.message.reply_text(f"✅ تم رفض السند #{receipt_id} وإشعار العميل.")
+        return
+
+    if state == "service_edit_field":
+        sid = context.user_data.get("service_edit_id")
+        field = context.user_data.get("service_edit_field")
+        columns = {
+            "name": "name",
+            "description": "description",
+            "duration": "subscription_duration",
+            "activation": "activation_time",
+        }
+        if field == "price":
+            try:
+                value = Decimal(text)
+                if value < 0:
+                    raise InvalidOperation
+            except Exception:
+                await update.message.reply_text("❌ أرسل سعراً رقمياً صحيحاً يساوي صفراً أو أكبر.")
+                return
+            column = "price"
+        else:
+            if not text or len(text) > (120 if field == "name" else 1800):
+                await update.message.reply_text("❌ القيمة فارغة أو أطول من الحد المسموح.")
+                return
+            value = text
+            column = columns.get(field)
+        if not sid or not column:
+            context.user_data.clear()
+            await update.message.reply_text("⚠️ انتهت جلسة التعديل. افتح الخدمة من جديد.")
+            return
+        db_execute(f"UPDATE services SET {column}=%s WHERE id=%s", (value, sid))
+        log_operation(None, "service_detail_updated", f"service={sid};field={column}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text("✅ تم حفظ التعديل بنجاح.")
         return
 
     if state == "service_name":
