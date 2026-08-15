@@ -1590,24 +1590,26 @@ async def claim_free_offer(update, context, srv):
     conn = DB_POOL.getconn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO free_offer_claims(user_id,service_id,claimed_at)
-                VALUES(%s,%s,CURRENT_TIMESTAMP)
-                ON CONFLICT(user_id) DO UPDATE
-                SET service_id=EXCLUDED.service_id,order_id=NULL,claimed_at=CURRENT_TIMESTAMP
-                WHERE free_offer_claims.claimed_at <= CURRENT_TIMESTAMP - INTERVAL '24 hours'
-                RETURNING user_id
-                """,
-                (uid, sid),
-            )
-            if not cur.fetchone():
-                conn.rollback()
-                await update.callback_query.answer(
-                    "🎁 يمكنك استلام عرض مجاني واحد كل 24 ساعة. جرّب مجدداً بعد مرور 24 ساعة من آخر عرض.",
-                    show_alert=True,
+            # المدير معفى من حد 24 ساعة لاختبار كل العروض؛ العملاء فقط هم المقيدون.
+            if uid != ADMIN_ID:
+                cur.execute(
+                    """
+                    INSERT INTO free_offer_claims(user_id,service_id,claimed_at)
+                    VALUES(%s,%s,CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE
+                    SET service_id=EXCLUDED.service_id,order_id=NULL,claimed_at=CURRENT_TIMESTAMP
+                    WHERE free_offer_claims.claimed_at <= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+                    RETURNING user_id
+                    """,
+                    (uid, sid),
                 )
-                return
+                if not cur.fetchone():
+                    conn.rollback()
+                    await update.callback_query.answer(
+                        "🎁 يمكنك استلام عرض مجاني واحد كل 24 ساعة. جرّب مجدداً بعد مرور 24 ساعة من آخر عرض.",
+                        show_alert=True,
+                    )
+                    return
             cur.execute(
                 """
                 INSERT INTO orders(user_id,service_id,status,total,delivered_text)
@@ -1617,7 +1619,8 @@ async def claim_free_offer(update, context, srv):
                 (uid, sid),
             )
             oid = cur.fetchone()[0]
-            cur.execute("UPDATE free_offer_claims SET order_id=%s WHERE user_id=%s", (oid, uid))
+            if uid != ADMIN_ID:
+                cur.execute("UPDATE free_offer_claims SET order_id=%s WHERE user_id=%s", (oid, uid))
         conn.commit()
     except Exception:
         conn.rollback()
