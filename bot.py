@@ -362,6 +362,10 @@ def init_db():
         "ALTER TABLE operation_log ADD COLUMN IF NOT EXISTS details TEXT DEFAULT ''",
         "ALTER TABLE operation_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "UPDATE operation_log SET id=DEFAULT WHERE id IS NULL",
+        # إعدادات واجهة العميل: تعديل النص والإجراء والإخفاء بدون حذف الصفوف.
+        "ALTER TABLE custom_buttons ADD COLUMN IF NOT EXISTS btn_action TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE custom_buttons ADD COLUMN IF NOT EXISTS is_visible BOOLEAN NOT NULL DEFAULT TRUE",
+        "UPDATE custom_buttons SET is_visible=TRUE WHERE is_visible IS NULL",
     ]
     for sql in migrations:
         db_execute(sql)
@@ -394,6 +398,9 @@ def init_db():
         ("my_profile", "👤 حسابي", "profile"),
         ("fund_account", "💰 تغذية حسابك", "fund"),
         ("support", "🆘 الدعم", "support"),
+        ("channel_link", "📢 قناة البوت", FORCED_CHANNEL_LINK),
+        ("whatsapp_link", "🌐 واتساب", WHATSAPP_LINK),
+        ("about", "ℹ️ عن المتجر", "about"),
     ]
     for row in buttons:
         db_execute(
@@ -667,41 +674,80 @@ async def subscription_ok(update, context):
     return True
 
 
-def button_text(key, fallback):
+def button_config(key, fallback_text, fallback_action):
     row = db_execute(
-        "SELECT btn_text FROM custom_buttons WHERE btn_key=%s",
+        "SELECT btn_text,btn_action,COALESCE(is_visible,TRUE) FROM custom_buttons WHERE btn_key=%s",
         (key,),
         fetch=True,
     )
-    return row[0] if row else fallback
+    if not row:
+        return fallback_text, fallback_action, True
+    text = row[0] if len(row) > 0 else fallback_text
+    action = row[1] if len(row) > 1 else fallback_action
+    visible = row[2] if len(row) > 2 else True
+    return text or fallback_text, action or fallback_action, bool(visible)
+
+
+def button_text(key, fallback):
+    return button_config(key, fallback, "")[0]
+
+
+def configured_main_button(key, fallback_text, fallback_action):
+    text, action, visible = button_config(key, fallback_text, fallback_action)
+    if not visible:
+        return None
+    if action.startswith(("https://", "http://")):
+        return green_button(text, url=action)
+    return green_button(text, callback_data=action)
+
+
+def add_button_row(keyboard, *buttons):
+    row = [button for button in buttons if button is not None]
+    if row:
+        keyboard.append(row)
+
+
+ALLOWED_CUSTOM_BUTTON_CALLBACKS = {
+    "cat:digital", "cat:subscriptions", "cat:rentals", "cat:vip", "cat:free",
+    "orders", "profile", "fund", "support", "about",
+}
+
+
+def valid_custom_button_action(action):
+    action = (action or "").strip()
+    return action in ALLOWED_CUSTOM_BUTTON_CALLBACKS or action.startswith(("https://", "http://"))
 
 
 def main_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            green_button(button_text("cat_digital", "⚡ الأدوات والبوكسات"), callback_data="cat:digital"),
-            green_button(button_text("cat_subscriptions", "🔵 الاشتراكات"), callback_data="cat:subscriptions"),
-        ],
-        [green_button(button_text("cat_rentals", "🔧 إيجار الأدوات والبوكسات"), callback_data="cat:rentals")],
-        [
-            green_button(button_text("cat_vip", "💎 عروض VIP"), callback_data="cat:vip"),
-            green_button(button_text("cat_free", "🎁 عروض مجانية"), callback_data="cat:free"),
-        ],
-        [
-            InlineKeyboardButton(button_text("my_orders", "📦 طلباتي"), callback_data="orders"),
-            InlineKeyboardButton(button_text("my_profile", "👤 حسابي"), callback_data="profile"),
-        ],
-        [
-            green_button(button_text("fund_account", "💰 تغذية حسابك"), callback_data="fund"),
-            InlineKeyboardButton(button_text("support", "🆘 الدعم"), callback_data="support"),
-        ],
-        [
-            InlineKeyboardButton("📢 قناة البوت", url=FORCED_CHANNEL_LINK),
-            InlineKeyboardButton("🌐 واتساب", url=WHATSAPP_LINK),
-        ],
-        [InlineKeyboardButton("🛠️ تواصل الإدارة", url=ADMIN_CONTACT_LINK)],
-        [InlineKeyboardButton("ℹ️ عن المتجر", callback_data="about")],
-    ])
+    keyboard = []
+    add_button_row(
+        keyboard,
+        configured_main_button("cat_digital", "⚡ الأدوات والبوكسات", "cat:digital"),
+        configured_main_button("cat_subscriptions", "🔵 الاشتراكات", "cat:subscriptions"),
+    )
+    add_button_row(keyboard, configured_main_button("cat_rentals", "🔧 إيجار الأدوات والبوكسات", "cat:rentals"))
+    add_button_row(
+        keyboard,
+        configured_main_button("cat_vip", "💎 عروض VIP", "cat:vip"),
+        configured_main_button("cat_free", "🎁 عروض مجانية", "cat:free"),
+    )
+    add_button_row(
+        keyboard,
+        configured_main_button("my_orders", "📦 طلباتي", "orders"),
+        configured_main_button("my_profile", "👤 حسابي", "profile"),
+    )
+    add_button_row(
+        keyboard,
+        configured_main_button("fund_account", "💰 تغذية حسابك", "fund"),
+        configured_main_button("support", "🆘 الدعم", "support"),
+    )
+    add_button_row(
+        keyboard,
+        configured_main_button("channel_link", "📢 قناة البوت", FORCED_CHANNEL_LINK),
+        configured_main_button("whatsapp_link", "🌐 واتساب", WHATSAPP_LINK),
+    )
+    add_button_row(keyboard, configured_main_button("about", "ℹ️ عن المتجر", "about"))
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def send_or_edit(update, text, markup=None):
@@ -1776,6 +1822,28 @@ async def admin_callback(update, context):
                 *admin_navigation_rows(),
             ]),
         )
+    elif data.startswith("editbuttonaction:"):
+        key = data.split(":", 1)[1]
+        context.user_data.clear()
+        context.user_data["admin_state"] = "button_action"
+        context.user_data["edit_button_key"] = key
+        await q.message.edit_text(
+            "🔗 أرسل الإجراء الجديد للزر.\n\n"
+            "يمكنك إرسال رابط يبدأ بـ https:// أو أحد الإجراءات التالية:\n"
+            "cat:digital, cat:subscriptions, cat:rentals, cat:vip, cat:free, orders, profile, fund, support, about",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:buttons")],
+                *admin_navigation_rows(),
+            ]),
+        )
+    elif data.startswith("togglebutton:"):
+        key = data.split(":", 1)[1]
+        db_execute(
+            "UPDATE custom_buttons SET is_visible=NOT COALESCE(is_visible,TRUE) WHERE btn_key=%s",
+            (key,),
+        )
+        log_operation(None, "button_visibility_toggled", f"button={key}", ADMIN_ID)
+        await admin_buttons(update)
     elif data == "payments":
         context.user_data.clear()
         await admin_payments(update)
@@ -2108,20 +2176,32 @@ async def admin_topup_receipts(update):
 
 
 async def admin_topup_page(update, context, receipt_id):
-    row = db_execute(
-        """
-        SELECT r.id,r.user_id,u.name,u.username,r.payment_title,r.receipt_number,
-               r.photo_file_id,r.status,r.requested_amount,r.approved_amount,
-               r.admin_note,r.created_at
-        FROM topup_receipts r
-        LEFT JOIN users u ON u.user_id=r.user_id
-        WHERE r.id=%s
-        """,
-        (receipt_id,),
-        fetch=True,
-    )
+    try:
+        row = db_execute(
+            """
+            SELECT r.id,r.user_id,u.name,u.username,r.payment_title,r.receipt_number,
+                   r.photo_file_id,r.status,r.requested_amount,r.approved_amount,
+                   r.admin_note,r.created_at
+            FROM topup_receipts r
+            LEFT JOIN users u ON u.user_id=r.user_id
+            WHERE r.id=%s
+            """,
+            (receipt_id,),
+            fetch=True,
+        )
+    except Exception as exc:
+        log.exception("Unable to open top-up receipt %s: %s", receipt_id, exc)
+        await send_or_edit(
+            update,
+            "⚠️ تعذر فتح تفاصيل السند مؤقتاً. أعد نشر آخر ملف bot.py ثم جرّب مرة أخرى.",
+            InlineKeyboardMarkup([
+                [red_button("↩️ كل السندات", callback_data="adm:topups")],
+                *admin_navigation_rows(),
+            ]),
+        )
+        return
     if not row:
-        await update.callback_query.answer("❌ السند غير موجود.", show_alert=True)
+        await update.callback_query.answer("❌ السند غير موجود أو تم حذفه.", show_alert=True)
         return
 
     text = (
@@ -2147,7 +2227,15 @@ async def admin_topup_page(update, context, receipt_id):
     keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
     if row[6]:
-        await context.bot.send_photo(ADMIN_ID, row[6], caption=f"صورة سند التحويل #{receipt_id}")
+        try:
+            await context.bot.send_photo(
+                ADMIN_ID,
+                row[6],
+                caption=f"🧾 صورة سند التحويل #{receipt_id}",
+            )
+        except TelegramError as exc:
+            # تظل تفاصيل السند مفتوحة حتى إذا كانت صورة قديمة غير متاحة في Telegram.
+            log.warning("Receipt #%s details opened but photo could not be resent: %s", receipt_id, exc)
 
 
 async def approve_topup_receipt(context, receipt_id, amount):
@@ -2267,18 +2355,25 @@ async def admin_test_channels(update, context):
 
 async def admin_buttons(update):
     rows = db_execute(
-        "SELECT btn_key,btn_text FROM custom_buttons ORDER BY btn_key",
+        "SELECT btn_key,btn_text,btn_action,COALESCE(is_visible,TRUE) FROM custom_buttons ORDER BY btn_key",
         fetchall=True,
     )
-    text = "🎛️ **تعديل أزرار الواجهة**\n\n"
+    text = (
+        "🎛️ **إدارة أزرار الواجهة**\n\n"
+        "يمكنك تعديل النص، تغيير الإجراء أو الرابط، وإخفاء الزر أو إظهاره. "
+        "الإخفاء قابل للاسترجاع ولا يحذف أي بيانات.\n\n"
+    )
     keyboard = []
-    for key, label in rows:
-        text += f"▪️ `{key}` → {label}\n"
+    for key, label, action, visible in rows:
+        status = "🟢 ظاهر" if visible else "🔴 مخفي"
+        text += f"▪️ `{key}` — {status}\n   النص: {label}\n   الإجراء: {action or 'غير مضبوط'}\n\n"
         keyboard.append([
-            InlineKeyboardButton(
-                f"✏️ تعديل {label[:30]}",
-                callback_data=f"adm:editbutton:{key}",
-            )
+            green_button("✏️ تعديل النص", callback_data=f"adm:editbutton:{key}"),
+            green_button("🔗 تعديل الإجراء", callback_data=f"adm:editbuttonaction:{key}"),
+        ])
+        keyboard.append([
+            red_button("🙈 إخفاء الزر", callback_data=f"adm:togglebutton:{key}")
+            if visible else green_button("👁️ إظهار الزر", callback_data=f"adm:togglebutton:{key}")
         ])
     keyboard.extend(admin_navigation_rows())
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
@@ -2825,11 +2920,32 @@ async def admin_text(update, context):
 
     if state == "button_text":
         key = context.user_data["edit_button_key"]
+        if not text or len(text) > 64:
+            await update.message.reply_text("❌ نص الزر يجب أن يكون بين 1 و64 حرفاً.")
+            return
         db_execute(
             "UPDATE custom_buttons SET btn_text=%s WHERE btn_key=%s",
             (text, key),
         )
-        await update.message.reply_text("✅ تم تحديث الزر.")
+        log_operation(None, "button_text_updated", f"button={key}", ADMIN_ID)
+        await update.message.reply_text("✅ تم تحديث نص الزر. افتح إدارة الأزرار لمراجعة النتيجة.")
+        context.user_data.clear()
+        return
+
+    if state == "button_action":
+        key = context.user_data["edit_button_key"]
+        action = text.strip()
+        if not valid_custom_button_action(action):
+            await update.message.reply_text(
+                "❌ الإجراء غير صالح. أرسل رابط https:// أو أحد الإجراءات المعروضة في رسالة التعليمات."
+            )
+            return
+        db_execute(
+            "UPDATE custom_buttons SET btn_action=%s WHERE btn_key=%s",
+            (action, key),
+        )
+        log_operation(None, "button_action_updated", f"button={key};action={action}", ADMIN_ID)
+        await update.message.reply_text("✅ تم تحديث إجراء الزر. افتح إدارة الأزرار لمراجعة النتيجة.")
         context.user_data.clear()
         return
 
