@@ -141,8 +141,8 @@ def external_api_call(action, **fields):
     if not EXTERNAL_API_URL.startswith("https://"):
         raise RuntimeError("External API URL must use HTTPS.")
     payload = {"key": EXTERNAL_API_KEY, "action": action}
-    # The provider selector is required by the supplier when listing its catalogue.
-    # Add/status/balance use the standard SMM payload shown in the supplier specification.
+    # The supplier specification requires provider=1 to select its service catalogue.
+    # Purchase and status actions remain in the standard SMM format specified by the provider.
     if EXTERNAL_API_PROVIDER and action == "services":
         payload["provider"] = EXTERNAL_API_PROVIDER
     payload.update({k: v for k, v in fields.items() if v is not None and v != ""})
@@ -158,6 +158,23 @@ def external_api_call(action, **fields):
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeError("External API returned invalid JSON.") from exc
+
+
+def external_error_summary(response):
+    """Return a short display-safe provider error without including request secrets."""
+    if not isinstance(response, dict):
+        return "استجابة غير متوقعة من المزود"
+    value = provider_value(
+        response,
+        "error", "message", "detail", "description", "error_message",
+        default="",
+    )
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False)
+    value = str(value or "").strip()
+    # Keep Telegram Markdown presentation safe and limit untrusted provider text.
+    value = re.sub(r"[\*_`\[\]]", "", value)
+    return value[:300] or "لم يعُد المزود برقم طلب"
 
 
 def external_services_list():
@@ -1736,6 +1753,21 @@ async def publish_purchase_to_channel(context, sid, service_name, price, order_i
         log.warning("PURCHASE_CHANNEL_CHAT_ID is invalid; channel notification skipped.")
         return False
 
+    try:
+        target_chat = await context.bot.get_chat(channel_id)
+        target_type = str(getattr(target_chat, "type", "")).lower()
+        if target_type != "channel":
+            log.warning(
+                "PURCHASE_CHANNEL_CHAT_ID points to %s, not a channel; post skipped for order %s.",
+                target_type or "unknown", order_id,
+            )
+            log_operation(None, "purchase_channel_invalid_target", f"order={order_id};type={target_type or 'unknown'}", ADMIN_ID)
+            return False
+    except TelegramError as exc:
+        log.warning("Purchase channel validation failed for order %s: %s", order_id, exc)
+        log_operation(None, "purchase_channel_validation_failed", f"order={order_id};error={str(exc)[:300]}", ADMIN_ID)
+        return False
+
     username = await purchase_channel_bot_username(context.bot)
     if not username:
         log.warning("Bot username unavailable; purchase channel notification skipped for order %s.", order_id)
@@ -2122,7 +2154,7 @@ async def finalize_customer_order(update, context):
             provider_order_id = provider_value(result, "order", "order_id", "id")
             provider_status = str(provider_value(result, "status", default="submitted"))
             if not provider_order_id:
-                raise RuntimeError("Provider did not return an order ID.")
+                raise RuntimeError(f"المزود رفض الطلب: {external_error_summary(result)}")
             db_execute(
                 "UPDATE orders SET provider_order_id=%s,provider_status=%s,status='قيد التنفيذ ⏳',updated_at=CURRENT_TIMESTAMP WHERE id=%s",
                 (str(provider_order_id), provider_status, oid),
@@ -2143,7 +2175,14 @@ async def finalize_customer_order(update, context):
                 raise
             finally:
                 DB_POOL.putconn(conn)
-            await send_or_edit(update, f"❌ تعذر تنفيذ الطلب لدى المورد.\n💰 تمت إعادة {money(price)}$ إلى رصيدك.", InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]))
+            reason = re.sub(r"[\*_`\[\]]", "", str(exc))[:300]
+            await send_or_edit(
+                update,
+                f"❌ تعذر تنفيذ الطلب لدى المورد.\n\n"
+                f"⚠️ السبب: {reason}\n"
+                f"💰 تمت إعادة {money(price)}$ إلى رصيدك.",
+                InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
+            )
             return
 
         await deliver_paid_service_attachment(context, uid, sid, context.user_data["order_service_name"], oid)
@@ -2530,6 +2569,9 @@ async def admin_panel(update, context):
             InlineKeyboardButton("🎛️ أزرار الشاشة", callback_data="adm:buttons"),
         ],
         [
+            InlineKeyboardButton("📣 اختبار قناة المشتريات", callback_data="adm:test_purchase_channel"),
+        ],
+        [
             InlineKeyboardButton("💳 طرق الدفع", callback_data="adm:payments"),
             InlineKeyboardButton("🧾 سندات التحويل", callback_data="adm:topups"),
         ],
@@ -2742,6 +2784,8 @@ async def admin_callback(update, context):
                 *admin_navigation_rows(),
             ]),
         )
+    elif data == "test_purchase_channel":
+        await admin_test_purchase_channel(update, context)
     elif data == "channels":
         context.user_data.clear()
         await admin_channels(update)
@@ -3447,6 +3491,68 @@ async def reject_topup_receipt(context, receipt_id, note):
     finally:
         DB_POOL.putconn(conn)
     return rejected_user_id
+
+
+async def admin_test_purchase_channel(update, context):
+    """Read-only validation for the configured purchase channel and bot posting permission."""
+    if not PURCHASE_CHANNEL_CHAT_ID:
+        await send_or_edit(
+            update,
+            "⚠️ لم يتم إعداد `PURCHASE_CHANNEL_CHAT_ID` في Render بعد.",
+            InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]),
+        )
+        return
+    try:
+        channel_id = int(PURCHASE_CHANNEL_CHAT_ID)
+    except (TypeError, ValueError):
+        await send_or_edit(
+            update,
+            "❌ قيمة `PURCHASE_CHANNEL_CHAT_ID` غير صحيحة. استخدم آيدي قناة بصيغة `-100...`.",
+            InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]),
+        )
+        return
+    try:
+        chat = await context.bot.get_chat(channel_id)
+        chat_type = str(getattr(chat, "type", "")).lower()
+        if chat_type != "channel":
+            await send_or_edit(
+                update,
+                "❌ آيدي المشتريات الحالي يشير إلى **قروب** أو هدف غير قناة.\n\n"
+                "ضع آيدي القناة نفسها في `PURCHASE_CHANNEL_CHAT_ID` داخل Render، وليس آيدي مجموعة النقاش.",
+                InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]),
+            )
+            return
+        me = await context.bot.get_me()
+        member = await context.bot.get_chat_member(channel_id, me.id)
+        status_obj = getattr(member, "status", "")
+        status = str(getattr(status_obj, "value", status_obj)).lower()
+        is_admin = status in {"administrator", "creator", "owner"}
+        can_post = status in {"creator", "owner"} or bool(getattr(member, "can_post_messages", False))
+        if not is_admin or not can_post:
+            await send_or_edit(
+                update,
+                f"⚠️ تم العثور على القناة: **{getattr(chat, 'title', 'بدون اسم')}**، "
+                "لكن البوت ليس مشرفاً بصلاحية نشر الرسائل.\n\n"
+                "أضفه مشرفاً وفعّل صلاحية **نشر الرسائل** ثم أعد الاختبار.",
+                InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]),
+            )
+            return
+        await send_or_edit(
+            update,
+            f"✅ **قناة المشتريات جاهزة**\n\n"
+            f"📢 القناة: {getattr(chat, 'title', 'بدون اسم')}\n"
+            f"🆔 الآيدي: `{channel_id}`\n"
+            "🤖 البوت مشرف ولديه صلاحية نشر الرسائل.\n\n"
+            "لن يُنشر أي اختبار الآن؛ ستصل منشورات الشراء للقناة بعد نجاح الطلبات المدفوعة.",
+            InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]),
+        )
+    except TelegramError as exc:
+        log.warning("Purchase channel admin test failed: %s", exc)
+        await send_or_edit(
+            update,
+            "❌ تعذر الوصول إلى قناة المشتريات. تأكد من الآيدي السالب، ومن أن البوت مشرف في القناة.",
+            InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]),
+        )
 
 
 async def admin_channels(update):
