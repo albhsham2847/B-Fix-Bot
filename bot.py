@@ -82,6 +82,11 @@ SUPPORT_LINK = os.getenv("SUPPORT_LINK", ADMIN_CONTACT_LINK).strip()
 # Optional external reseller API. Keep the secret in Render Environment Variables.
 EXTERNAL_API_URL = os.getenv("EXTERNAL_API_URL", "").strip()
 EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY", "").strip()
+# Prodseller/SMM provider selector. Keep it in Render to support multiple provider endpoints safely.
+EXTERNAL_API_PROVIDER = os.getenv("EXTERNAL_API_PROVIDER", "1").strip()
+# Purchase-channel settings. No customer information is ever published to this channel.
+PURCHASE_CHANNEL_CHAT_ID = os.getenv("PURCHASE_CHANNEL_CHAT_ID", "").strip()
+BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@")
 FORCED_CHANNEL_LINK = os.getenv(
     "FORCED_CHANNEL_LINK",
     "https://t.me/+0QKwgEMQwHg2Y2U0",
@@ -130,9 +135,16 @@ def external_api_configured():
 
 
 def external_api_call(action, **fields):
+    """Call the configured SMM-compatible provider without exposing its key in logs or messages."""
     if not external_api_configured():
-        raise RuntimeError("External API is not configured. Set EXTERNAL_API_URL and EXTERNAL_API_KEY.")
+        raise RuntimeError("External API is not configured. Set EXTERNAL_API_URL and EXTERNAL_API_KEY in Render.")
+    if not EXTERNAL_API_URL.startswith("https://"):
+        raise RuntimeError("External API URL must use HTTPS.")
     payload = {"key": EXTERNAL_API_KEY, "action": action}
+    # The provider selector is required by the supplier when listing its catalogue.
+    # Add/status/balance use the standard SMM payload shown in the supplier specification.
+    if EXTERNAL_API_PROVIDER and action == "services":
+        payload["provider"] = EXTERNAL_API_PROVIDER
     payload.update({k: v for k, v in fields.items() if v is not None and v != ""})
     data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(EXTERNAL_API_URL, data=data, method="POST")
@@ -152,6 +164,8 @@ def external_services_list():
     data = external_api_call("services")
     if isinstance(data, list):
         return data
+    if not isinstance(data, dict):
+        return []
     for key in ("services", "data", "result"):
         if isinstance(data.get(key), list):
             return data[key]
@@ -389,6 +403,8 @@ def init_db():
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS pre_purchase_message TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_content_text TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_content_link TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_photo_file_id TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_document_file_id TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_content_text TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_content_link TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_photo_file_id TEXT DEFAULT ''",
@@ -890,6 +906,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user)
 
+    # Channel posts use /start service_<id> deep links; open the requested service directly.
+    payload = context.args[0] if context.args else ""
+    if payload.startswith("service_") and payload[8:].isdigit():
+        await show_service(update, int(payload[8:]))
+        return
+
     text = (
         f"✦ ━━━━━━ ❲ **{BOT_NAME}** ❳ ━━━━━━ ✦\n\n"
         f"أهلاً بك يا [{user.first_name}](tg://user?id={user.id}) في وجهتك للخدمات الرقمية المختارة.\n\n"
@@ -902,7 +924,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💎 **خدمات VIP المخصصة**\n"
         "بوتات ومواقع وتطبيقات وتصاميم سوشال ميديا، وحلول أمن سيبراني مصرح بها.\n\n"
         "🎁 **العروض المجانية**\n"
-        "هدايا رقمية تصل تلقائياً بالنص والرابط والصورة والملف.\n\n"
+        "هدايا رقمية تصل تلقائياً بالنص والرابط والصورة والملف. للعميل عرض واحد كل 6 ساعات.\n\n"
         "اختر القسم المناسب من القائمة أدناه."
     )
     await send_or_edit(update, text, main_keyboard())
@@ -938,6 +960,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await payment_methods(update)
         else:
             await start(update, context)
+        return
+
+    if data.startswith("free_offer_timer:"):
+        await free_offer_timer(update, context, int(data.split(":", 1)[1]))
         return
 
     if data.startswith("cat:"):
@@ -1060,7 +1086,7 @@ CATEGORY_INFO = {
     ),
     "free": (
         "🎁 العروض المجانية",
-        "هدايا رقمية تُسلّم تلقائياً بالنص والرابط والصورة والملف. يحق لكل حساب استلام عرض مجاني واحد.",
+        "هدايا رقمية تُسلّم تلقائياً بالنص والرابط والصورة والملف. يحق للعميل استلام عرض واحد كل 6 ساعات.",
     ),
 }
 
@@ -1137,7 +1163,7 @@ async def show_service(update, sid):
         """
         SELECT id,category_key,name,description,subscription_duration,
                activation_time,price,delivery_mode,needs_email,needs_note,
-               needs_phone,pre_purchase_message,service_content_text,service_content_link
+               needs_phone,pre_purchase_message
         FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
         """,
         (sid,),
@@ -1165,8 +1191,6 @@ async def show_service(update, sid):
         f"⏳ **{duration_label}:** {srv[4] or 'حسب الخدمة'}\n"
         f"⚡ **{activation_label}:** {srv[5] or 'حسب الخدمة'}\n"
         f"💵 **السعر:** {money(srv[6])}$\n"
-        f"{('📝 **محتوى إضافي:**\n' + srv[12] + '\n') if (srv[12] or '').strip() else ''}"
-        f"{('🔗 **الرابط:** ' + srv[13] + '\n') if (srv[13] or '').strip() else ''}"
     )
     if srv[11]:
         text += f"\nℹ️ **تعليمات قبل الطلب:**\n{srv[11]}\n"
@@ -1468,8 +1492,8 @@ async def finish_free_offer_creation(update, context, document_file_id=""):
     )
 
 
-async def finish_regular_service_creation(update, context, file_id="", file_kind=""):
-    """Persist a regular service with optional pre-purchase text/link and paid-delivery media."""
+async def finish_regular_service_creation(update, context, photo_file_id="", document_file_id=""):
+    """Create a paid service and persist only optional content supplied by the administrator."""
     d = context.user_data
     options = set(d.get("service_options", []))
     row = db_execute(
@@ -1477,8 +1501,8 @@ async def finish_regular_service_creation(update, context, file_id="", file_kind
         INSERT INTO services(
             category_key,name,description,subscription_duration,activation_time,price,delivery_mode,
             needs_email,needs_note,needs_phone,pre_purchase_message,service_content_text,service_content_link,
-            file_id,file_kind,customer_request_prompt,active
-        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+            service_photo_file_id,service_document_file_id,file_id,file_kind,customer_request_prompt,active
+        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
         RETURNING id
         """,
         (
@@ -1486,7 +1510,11 @@ async def finish_regular_service_creation(update, context, file_id="", file_kind
             d["service_duration"], d["service_activation"], d["service_price"], d["service_mode"],
             "email" in options, "note" in options, "phone" in options,
             d.get("service_pre_message", ""), d.get("service_content_text", ""), d.get("service_content_link", ""),
-            file_id, file_kind, d.get("service_request_prompt", ""),
+            photo_file_id, document_file_id,
+            # Keep legacy media columns populated as a safe fallback for previously existing delivery paths.
+            photo_file_id or document_file_id,
+            "photo" if photo_file_id else ("document" if document_file_id else ""),
+            d.get("service_request_prompt", ""),
         ),
         fetch=True,
     )
@@ -1496,15 +1524,15 @@ async def finish_regular_service_creation(update, context, file_id="", file_kind
     context.user_data.clear()
     await update.message.reply_text(
         "✅ **تمت إضافة الخدمة بالكامل.**\n\n"
-        f"🛒 {name}\n💵 {price}$\n📂 {category}\n"
-        "📝 النص/الرابط قبل الشراء: تم حفظهما إن وُجدا\n"
-        "📎 المرفق: تم حفظه للتسليم بعد نجاح الشراء إن وُجد.",
+        f"🛒 {name}\n💵 {price}$\n📂 {category}\n\n"
+        "تم حفظ الملاحظة قبل الشراء والنص والرابط والصورة والملف عند توفرها. "
+        "لا تصل محتويات التسليم المدفوعة إلى العميل إلا بعد نجاح الدفع.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def service_media_handler(update, context):
-    """Save optional Telegram photo/document attachments for free offers and service media."""
+    """Save optional Telegram media for free offers and paid-service delivery."""
     if update.effective_user.id != ADMIN_ID:
         return False
     state = context.user_data.get("admin_state")
@@ -1530,20 +1558,49 @@ async def service_media_handler(update, context):
         if not message.photo:
             await update.message.reply_text("❌ أرسل الصورة كصورة تيليجرام، أو أرسل - لتخطيها.")
             return True
-        context.user_data["service_add_photo_id"] = message.photo[-1].file_id
-        context.user_data["service_add_file_kind"] = "photo"
+        context.user_data["service_add_photo_file_id"] = message.photo[-1].file_id
         context.user_data["admin_state"] = "service_add_document"
-        await update.message.reply_text("📎 تم حفظ الصورة. أرسل - لإنشاء الخدمة الآن.")
+        await update.message.reply_text("📎 تم حفظ الصورة. أرسل الآن ملف الخدمة، أو أرسل - لإنشاء الخدمة.")
         return True
 
     if state == "service_add_document":
         if not message.document:
             await update.message.reply_text("❌ أرسل الملف كمستند تيليجرام، أو أرسل - لإنشاء الخدمة.")
             return True
-        if context.user_data.get("service_add_file_kind") == "photo":
-            await update.message.reply_text("ℹ️ تم حفظ الصورة بالفعل. لا يمكن إضافة ملف ثانٍ لنفس الخدمة في هذه المرحلة.")
+        await finish_regular_service_creation(
+            update,
+            context,
+            context.user_data.get("service_add_photo_file_id", ""),
+            message.document.file_id,
+        )
+        return True
+
+    if state == "service_edit_paid_photo":
+        if not message.photo:
+            await update.message.reply_text("❌ أرسل الصورة كصورة تيليجرام.")
             return True
-        await finish_regular_service_creation(update, context, message.document.file_id, "document")
+        sid = context.user_data.get("service_file_id")
+        db_execute(
+            "UPDATE services SET service_photo_file_id=%s,file_id=%s,file_kind='photo' WHERE id=%s",
+            (message.photo[-1].file_id, message.photo[-1].file_id, sid),
+        )
+        log_operation(None, "service_paid_photo_updated", f"service={sid}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text("✅ تم حفظ صورة الخدمة للتسليم التلقائي بعد الدفع.")
+        return True
+
+    if state == "service_edit_paid_document":
+        if not message.document:
+            await update.message.reply_text("❌ أرسل الملف كمستند تيليجرام.")
+            return True
+        sid = context.user_data.get("service_file_id")
+        db_execute(
+            "UPDATE services SET service_document_file_id=%s,file_id=%s,file_kind='document' WHERE id=%s",
+            (message.document.file_id, message.document.file_id, sid),
+        )
+        log_operation(None, "service_paid_document_updated", f"service={sid}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text("✅ تم حفظ ملف الخدمة للتسليم التلقائي بعد الدفع.")
         return True
 
     if state != "service_file":
@@ -1551,17 +1608,21 @@ async def service_media_handler(update, context):
     sid = context.user_data.get("service_file_id")
     if message.photo:
         file_id, file_kind = message.photo[-1].file_id, "photo"
+        db_execute(
+            "UPDATE services SET file_id=%s,file_kind=%s,service_photo_file_id=%s WHERE id=%s",
+            (file_id, file_kind, file_id, sid),
+        )
     elif message.document:
         file_id, file_kind = message.document.file_id, "document"
+        db_execute(
+            "UPDATE services SET file_id=%s,file_kind=%s,service_document_file_id=%s WHERE id=%s",
+            (file_id, file_kind, file_id, sid),
+        )
     else:
         return False
-    db_execute(
-        "UPDATE services SET file_id=%s,file_kind=%s WHERE id=%s",
-        (file_id, file_kind, sid),
-    )
     log_operation(None, "service_media_updated", f"service={sid};kind={file_kind}", ADMIN_ID)
     context.user_data.clear()
-    await update.message.reply_text("✅ تم حفظ المرفق للخدمة. سيتم تسليمه للعميل تلقائياً بعد نجاح شراء الخدمة.")
+    await update.message.reply_text("✅ تم حفظ المرفق للخدمة. سيتم تسليمه تلقائياً بعد نجاح شراء الخدمة.")
     return True
 
 
@@ -1588,16 +1649,47 @@ async def deliver_service_media(bot, user_id, file_id, file_kind, caption):
         await bot.send_document(user_id, file_id, caption=caption)
 
 
+
 async def deliver_paid_service_attachment(context, uid, sid, service_name, order_id):
-    row = db_execute("SELECT file_id,file_kind FROM services WHERE id=%s", (sid,), fetch=True)
-    if not row or not row[0] or not row[1]:
+    """Deliver paid text/link and any photo/document only after the order has committed."""
+    row = db_execute(
+        """
+        SELECT service_content_text,service_content_link,service_photo_file_id,service_document_file_id,file_id,file_kind
+        FROM services WHERE id=%s
+        """,
+        (sid,),
+        fetch=True,
+    )
+    if not row:
         return False
+    content, link, photo_id, document_id, legacy_file_id, legacy_file_kind = row
+    content, link = (content or "").strip(), (link or "").strip()
+    photo_id, document_id = (photo_id or "").strip(), (document_id or "").strip()
     try:
-        await deliver_service_media(context.bot, uid, row[0], row[1], f"📎 مرفق الخدمة: {service_name}")
-        log_operation(uid, "paid_service_media_delivered", f"order={order_id};service={sid}")
-        return True
+        delivered = False
+        if content or link:
+            message = f"📦 **محتوى الخدمة: {service_name}**"
+            if content:
+                message += f"\n\n{content}"
+            if link:
+                message += f"\n\n🔗 الرابط: {link}"
+            await context.bot.send_message(uid, message, parse_mode=ParseMode.MARKDOWN)
+            delivered = True
+        if photo_id:
+            await context.bot.send_photo(uid, photo_id, caption=f"🖼️ مرفق خدمة: {service_name}")
+            delivered = True
+        if document_id:
+            await context.bot.send_document(uid, document_id, caption=f"📎 مرفق خدمة: {service_name}")
+            delivered = True
+        # Compatibility fallback for services created before the new separate photo/document fields.
+        if not photo_id and not document_id and legacy_file_id and legacy_file_kind:
+            await deliver_service_media(context.bot, uid, legacy_file_id, legacy_file_kind, f"📎 مرفق الخدمة: {service_name}")
+            delivered = True
+        if delivered:
+            log_operation(uid, "paid_service_content_delivered", f"order={order_id};service={sid}")
+        return delivered
     except TelegramError as exc:
-        log.warning("Paid service media delivery failed for order %s: %s", order_id, exc)
+        log.warning("Paid service content delivery failed for order %s: %s", order_id, exc)
         return False
 
 
@@ -1622,6 +1714,63 @@ async def support_page(update):
 
 WAIT_EMAIL, WAIT_NOTE, WAIT_PHONE, WAIT_CARD = range(4)
 
+async def purchase_channel_bot_username(bot):
+    """Return the configured username, or resolve it at runtime without persisting a secret."""
+    if BOT_USERNAME:
+        return BOT_USERNAME
+    try:
+        profile = await bot.get_me()
+        return (profile.username or "").lstrip("@")
+    except TelegramError as exc:
+        log.warning("Could not resolve bot username for purchase channel: %s", exc)
+        return ""
+
+
+async def publish_purchase_to_channel(context, sid, service_name, price, order_id, status):
+    """Publish only store-level purchase facts after a successful commit; never publish customer data."""
+    if not PURCHASE_CHANNEL_CHAT_ID:
+        return False
+    try:
+        channel_id = int(PURCHASE_CHANNEL_CHAT_ID)
+    except (TypeError, ValueError):
+        log.warning("PURCHASE_CHANNEL_CHAT_ID is invalid; channel notification skipped.")
+        return False
+
+    username = await purchase_channel_bot_username(context.bot)
+    if not username:
+        log.warning("Bot username unavailable; purchase channel notification skipped for order %s.", order_id)
+        return False
+
+    entry_url = f"https://t.me/{username}"
+    purchase_url = f"{entry_url}?start=service_{sid}"
+    text = (
+        "🛍️ طلب جديد في متجر B-Fix\n\n"
+        f"🛒 الخدمة: {service_name}\n"
+        f"💵 السعر: {money(price)}$\n"
+        f"🆔 رقم الطلب: #{order_id}\n"
+        f"✅ الحالة: {status}\n\n"
+        "استخدم الأزرار أدناه للدخول إلى البوت أو فتح صفحة الخدمة."
+    )
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 دخول البوت", url=entry_url)],
+        [InlineKeyboardButton("🛒 شراء الخدمة", url=purchase_url)],
+    ])
+    try:
+        await context.bot.send_message(
+            chat_id=channel_id,
+            text=text,
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
+        log_operation(None, "purchase_channel_published", f"order={order_id};service={sid};status={status}", ADMIN_ID)
+        return True
+    except TelegramError as exc:
+        # A post-notification failure must never change a completed charge/order.
+        log.warning("Purchase channel publish failed for order %s: %s", order_id, exc)
+        log_operation(None, "purchase_channel_publish_failed", f"order={order_id};service={sid};error={str(exc)[:300]}", ADMIN_ID)
+        return False
+
+
 async def begin_order(update, context, sid):
     uid = update.effective_user.id
     srv = db_execute(
@@ -1629,6 +1778,7 @@ async def begin_order(update, context, sid):
         SELECT id,category_key,name,description,subscription_duration,
                activation_time,price,delivery_mode,needs_email,needs_note,
                needs_phone,file_id,file_kind,pre_purchase_message,service_content_text,service_content_link,
+               service_photo_file_id,service_document_file_id,
                free_content_text,free_content_link,free_photo_file_id,free_document_file_id,
                customer_request_prompt
         FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
@@ -1651,16 +1801,13 @@ async def begin_order(update, context, sid):
             fetch=True,
         )
         if not item:
-            await update.callback_query.answer("❌ نفد المخزون.", show_alert=True)
+            await show_out_of_stock(update, uid, sid)
             return
 
     user = get_user(uid)
     price = Decimal(str(srv[6]))
     if Decimal(str(user[2])) < price:
-        await update.callback_query.answer(
-            "❌ رصيدك غير كافٍ. قم بتغذية حسابك أولًا.",
-            show_alert=True,
-        )
+        await show_insufficient_balance(update, uid, sid, price, user[2])
         return
 
     context.user_data.clear()
@@ -1674,9 +1821,7 @@ async def begin_order(update, context, sid):
     context.user_data["order_file_id"] = srv[11] or ""
     context.user_data["order_file_kind"] = srv[12] or ""
     context.user_data["order_pre_purchase_message"] = srv[13] or ""
-    context.user_data["order_content_text"] = srv[14] or ""
-    context.user_data["order_content_link"] = srv[15] or ""
-    context.user_data["order_customer_request_prompt"] = srv[20] or ""
+    context.user_data["order_customer_request_prompt"] = srv[22] or ""
 
     if srv[8]:
         await update.callback_query.message.edit_text(
@@ -1713,29 +1858,134 @@ async def begin_order(update, context, sid):
     await request_order_confirmation(update, context)
 
 
+def format_remaining_time(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def free_offer_remaining_seconds(user_id):
+    row = db_execute(
+        """
+        SELECT EXTRACT(EPOCH FROM (claimed_at + INTERVAL '6 hours' - CURRENT_TIMESTAMP))
+        FROM free_offer_claims WHERE user_id=%s
+        """,
+        (user_id,),
+        fetch=True,
+    )
+    if not row or row[0] is None:
+        return 0
+    return max(0, int(float(row[0])))
+
+
+async def show_free_offer_wait(update, user_id, sid):
+    remaining = free_offer_remaining_seconds(user_id)
+    if remaining <= 0:
+        await send_or_edit(
+            update,
+            "✅ **انتهت مدة الانتظار.**\n\nيمكنك الآن اختيار عرض مجاني جديد.",
+            InlineKeyboardMarkup([
+                [green_button("🎁 عرض العروض المجانية", callback_data="cat:free")],
+                [red_button("🏠 الرئيسية", callback_data="main")],
+            ]),
+        )
+        return False
+    await send_or_edit(
+        update,
+        "🎁 **العروض المجانية متاحة كل 6 ساعات**\n\n"
+        "لقد استلمت عرضك المجاني الأخير بالفعل.\n"
+        f"⏳ الوقت المتبقي: **{format_remaining_time(remaining)}**\n\n"
+        "يمكنك تحديث العداد في أي وقت.",
+        InlineKeyboardMarkup([
+            [green_button("🔄 تحديث الوقت", callback_data=f"free_offer_timer:{sid}")],
+            [red_button("↩️ العروض المجانية", callback_data="cat:free")],
+            [red_button("🏠 الرئيسية", callback_data="main")],
+        ]),
+    )
+    return True
+
+
+async def free_offer_timer(update, context, sid):
+    if update.effective_user.id == ADMIN_ID:
+        await send_or_edit(
+            update,
+            "👑 **وضع المدير**\n\nأنت معفى من قيد العروض المجانية ويمكنك الاستلام للاختبار في أي وقت.",
+            InlineKeyboardMarkup([
+                [green_button("🎁 عرض العروض المجانية", callback_data="cat:free")],
+                [red_button("🏠 الرئيسية", callback_data="main")],
+            ]),
+        )
+        return
+    await show_free_offer_wait(update, update.effective_user.id, sid)
+
+
+async def show_insufficient_balance(update, user_id, sid, price, balance):
+    price = Decimal(str(price))
+    balance = Decimal(str(balance))
+    shortage = max(Decimal("0"), price - balance)
+    log_operation(user_id, "purchase_blocked_insufficient_balance", f"service={sid};price={money(price)};balance={money(balance)};shortage={money(shortage)}")
+    await send_or_edit(
+        update,
+        "❌ **رصيدك غير كافٍ لإتمام الطلب**\n\n"
+        f"💵 سعر الخدمة: **{money(price)}$**\n"
+        f"💰 رصيدك الحالي: **{money(balance)}$**\n"
+        f"⚠️ المبلغ الناقص: **{money(shortage)}$**\n\n"
+        "اشحن حسابك ثم عُد لإتمام الشراء.",
+        InlineKeyboardMarkup([
+            [green_button("💰 تغذية حسابك", callback_data="fund")],
+            [red_button("↩️ رجوع للخدمة", callback_data=f"service:{sid}")],
+            [red_button("🏠 الرئيسية", callback_data="main")],
+        ]),
+    )
+
+
+async def show_out_of_stock(update, user_id, sid):
+    log_operation(user_id, "purchase_blocked_out_of_stock", f"service={sid}")
+    await send_or_edit(
+        update,
+        "📦 **نفدت الكمية من المخزون**\n\n"
+        "هذه الخدمة غير متاحة للتسليم الفوري حالياً. لم يُخصم أي مبلغ من رصيدك ولم يُنشأ أي طلب. "
+        "يمكنك المحاولة لاحقاً بعد إضافة كمية جديدة.",
+        InlineKeyboardMarkup([
+            [red_button("↩️ رجوع للخدمة", callback_data=f"service:{sid}")],
+            [red_button("🏠 الرئيسية", callback_data="main")],
+        ]),
+    )
+
+
 async def claim_free_offer(update, context, srv):
-    """Grant exactly one free-offer claim per customer without charging a balance."""
+    """Deliver one free offer every six hours for customers; the configured manager is exempt."""
     uid, sid = update.effective_user.id, srv[0]
     conn = DB_POOL.getconn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO free_offer_claims(user_id,service_id,claimed_at)
-                VALUES(%s,%s,CURRENT_TIMESTAMP)
-                ON CONFLICT(user_id) DO UPDATE
-                SET service_id=EXCLUDED.service_id,order_id=NULL,claimed_at=CURRENT_TIMESTAMP
-                WHERE free_offer_claims.claimed_at <= CURRENT_TIMESTAMP - INTERVAL '24 hours'
-                RETURNING user_id
-                """,
-                (uid, sid),
-            )
+            if uid == ADMIN_ID:
+                cur.execute(
+                    """
+                    INSERT INTO free_offer_claims(user_id,service_id,claimed_at)
+                    VALUES(%s,%s,CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE
+                    SET service_id=EXCLUDED.service_id,order_id=NULL,claimed_at=CURRENT_TIMESTAMP
+                    RETURNING user_id
+                    """,
+                    (uid, sid),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO free_offer_claims(user_id,service_id,claimed_at)
+                    VALUES(%s,%s,CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE
+                    SET service_id=EXCLUDED.service_id,order_id=NULL,claimed_at=CURRENT_TIMESTAMP
+                    WHERE free_offer_claims.claimed_at <= CURRENT_TIMESTAMP - INTERVAL '6 hours'
+                    RETURNING user_id
+                    """,
+                    (uid, sid),
+                )
             if not cur.fetchone():
                 conn.rollback()
-                await update.callback_query.answer(
-                    "🎁 يمكنك استلام عرض مجاني واحد كل 24 ساعة. جرّب مجدداً بعد مرور 24 ساعة من آخر عرض.",
-                    show_alert=True,
-                )
+                await show_free_offer_wait(update, uid, sid)
                 return
             cur.execute(
                 """
@@ -1754,16 +2004,16 @@ async def claim_free_offer(update, context, srv):
     finally:
         DB_POOL.putconn(conn)
 
-    content = (srv[16] or "").strip()
-    link = (srv[17] or "").strip()
-    photo_id = (srv[18] or "").strip()
-    document_id = (srv[19] or "").strip()
+    content = (srv[18] or "").strip()
+    link = (srv[19] or "").strip()
+    photo_id = (srv[20] or "").strip()
+    document_id = (srv[21] or "").strip()
     try:
         if content or link:
-            text = f"🎁 **{srv[2]}**\n\n{content}"
+            message = f"🎁 **{srv[2]}**\n\n{content}"
             if link:
-                text += f"\n\n🔗 الرابط: {link}"
-            await context.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN)
+                message += f"\n\n🔗 الرابط: {link}"
+            await context.bot.send_message(uid, message, parse_mode=ParseMode.MARKDOWN)
         if photo_id:
             await context.bot.send_photo(uid, photo_id, caption=f"🖼️ صورة عرض: {srv[2]}")
         if document_id:
@@ -1772,14 +2022,16 @@ async def claim_free_offer(update, context, srv):
             "UPDATE orders SET status='مكتمل ✅ - تم تسليم العرض',delivered_text=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s",
             ("تم تسليم النص والرابط والصورة والملف تلقائياً.", oid),
         )
-        log_operation(uid, "free_offer_claimed", f"order={oid};service={sid}")
+        log_operation(uid, "free_offer_claimed", f"order={oid};service={sid};admin_exempt={uid == ADMIN_ID}")
+        timing_line = "👑 أنت معفى من القيد بصفتك المدير." if uid == ADMIN_ID else "⏳ يمكنك استلام عرض جديد بعد **6 ساعات** من الآن."
         await send_or_edit(
             update,
             "✅ **تم استلام العرض المجاني بنجاح**\n\n"
-            "أرسل البوت لك النص والرابط والصورة والملف في رسائل منفصلة.\n"
-            "يمكنك استلام عرض مجاني جديد بعد مرور 24 ساعة من آخر مطالبة.",
+            "أرسل البوت النص والرابط والصورة والملف في رسائل منفصلة عند توفرها.\n"
+            f"{timing_line}",
             InlineKeyboardMarkup([
                 [green_button("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],
+                [green_button("🔄 تحديث الوقت", callback_data=f"free_offer_timer:{sid}")],
                 [red_button("🏠 الرئيسية", callback_data="main")],
             ]),
         )
@@ -1802,24 +2054,17 @@ async def claim_free_offer(update, context, srv):
 
 
 async def request_order_confirmation(update, context):
-    """Show service content/instructions before the final irreversible balance charge."""
+    """Show only the optional pre-purchase note before the final balance charge."""
     guidance = (context.user_data.get("order_pre_purchase_message") or "").strip()
-    content = (context.user_data.get("order_content_text") or "").strip()
-    link = (context.user_data.get("order_content_link") or "").strip()
-    if not guidance and not content and not link:
+    if not guidance:
         await finalize_customer_order(update, context)
         return
     context.user_data["order_confirm_required"] = True
-    blocks = []
-    if guidance:
-        blocks.append(f"ℹ️ **تعليمات قبل شراء الخدمة**\n\n{guidance}")
-    if content:
-        blocks.append(f"📝 **محتوى الخدمة**\n\n{content}")
-    if link:
-        blocks.append(f"🔗 **الرابط:** {link}")
     await send_or_edit(
         update,
-        "\n\n".join(blocks) + "\n\nبعد مراجعة المعلومات اضغط «متابعة الطلب» ليتم خصم الرصيد وإنشاء الطلب.",
+        f"ℹ️ **ملاحظة قبل شراء الخدمة**\n\n{guidance}\n\n"
+        "بعد مراجعة الملاحظة اضغط «متابعة الطلب» ليتم خصم الرصيد وإنشاء الطلب. "
+        "النص والرابط والمرفقات الخاصة بالخدمة تُرسل بعد نجاح الشراء فقط.",
         InlineKeyboardMarkup([
             [green_button("✅ متابعة الطلب", callback_data="buyconfirm:continue")],
             [red_button("🚫 إلغاء", callback_data="flowcancel:main")],
@@ -1853,8 +2098,9 @@ async def finalize_customer_order(update, context):
                 cur.execute("SELECT balance FROM users WHERE user_id=%s FOR UPDATE", (uid,))
                 row = cur.fetchone()
                 if not row or Decimal(str(row[0])) < price:
+                    current_balance = row[0] if row else Decimal("0")
                     conn.rollback()
-                    await send_or_edit(update, "❌ رصيدك غير كافٍ.", InlineKeyboardMarkup([[InlineKeyboardButton("💰 تغذية الحساب", callback_data="fund")]]))
+                    await show_insufficient_balance(update, uid, sid, price, current_balance)
                     return
                 cur.execute("UPDATE users SET balance=balance-%s WHERE user_id=%s", (price, uid))
                 cur.execute(
@@ -1900,7 +2146,11 @@ async def finalize_customer_order(update, context):
             await send_or_edit(update, f"❌ تعذر تنفيذ الطلب لدى المورد.\n💰 تمت إعادة {money(price)}$ إلى رصيدك.", InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]))
             return
 
-        paid_media_delivered = await deliver_paid_service_attachment(context, uid, sid, context.user_data["order_service_name"], oid)
+        await deliver_paid_service_attachment(context, uid, sid, context.user_data["order_service_name"], oid)
+        await publish_purchase_to_channel(
+            context, sid, context.user_data["order_service_name"], price, oid,
+            f"تم إرساله للمزود — {provider_status}",
+        )
         log_operation(uid, "external_purchase", f"order={oid};service={sid};provider_order={provider_order_id};price={money(price)}")
         await send_or_edit(update, f"✅ **تم إرسال طلبك للمورد بنجاح**\n\n🛒 الخدمة: {context.user_data['order_service_name']}\n💵 المبلغ: {money(price)}$\n🆔 رقم الطلب: `{provider_order_id}`\n\n⏳ الحالة: {provider_status}", InlineKeyboardMarkup([[InlineKeyboardButton("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],[red_button("🏠 الرئيسية", callback_data="main")]]), parse_mode=ParseMode.MARKDOWN)
         return
@@ -1927,11 +2177,7 @@ async def finalize_customer_order(update, context):
                 inventory_row = cur.fetchone()
                 if not inventory_row:
                     conn.rollback()
-                    await send_or_edit(
-                        update,
-                        "❌ نفد المخزون قبل إتمام العملية.",
-                        InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
-                    )
+                    await show_out_of_stock(update, uid, sid)
                     return
 
                 cur.execute(
@@ -1941,11 +2187,7 @@ async def finalize_customer_order(update, context):
                 balance = cur.fetchone()[0]
                 if Decimal(str(balance)) < price:
                     conn.rollback()
-                    await send_or_edit(
-                        update,
-                        "❌ رصيدك غير كافٍ.",
-                        InlineKeyboardMarkup([[InlineKeyboardButton("💰 تغذية الحساب", callback_data="fund")]]),
-                    )
+                    await show_insufficient_balance(update, uid, sid, price, balance)
                     return
 
                 cur.execute(
@@ -1982,7 +2224,11 @@ async def finalize_customer_order(update, context):
         finally:
             DB_POOL.putconn(conn)
 
-        paid_media_delivered = await deliver_paid_service_attachment(context, uid, sid, context.user_data["order_service_name"], oid)
+        await deliver_paid_service_attachment(context, uid, sid, context.user_data["order_service_name"], oid)
+        await publish_purchase_to_channel(
+            context, sid, context.user_data["order_service_name"], price, oid,
+            "تم التسليم الفوري",
+        )
         log_operation(uid, "stock_purchase", f"order={oid};service={sid};price={price}")
         await send_or_edit(
             update,
@@ -2023,11 +2269,7 @@ async def finalize_customer_order(update, context):
             balance = cur.fetchone()[0]
             if Decimal(str(balance)) < price:
                 conn.rollback()
-                await send_or_edit(
-                    update,
-                    "❌ رصيدك غير كافٍ.",
-                    InlineKeyboardMarkup([[InlineKeyboardButton("💰 تغذية الحساب", callback_data="fund")]]),
-                )
+                await show_insufficient_balance(update, uid, sid, price, balance)
                 return
 
             cur.execute(
@@ -2054,6 +2296,10 @@ async def finalize_customer_order(update, context):
     finally:
         DB_POOL.putconn(conn)
 
+    await publish_purchase_to_channel(
+        context, sid, context.user_data["order_service_name"], price, oid,
+        "قيد التنفيذ",
+    )
     log_operation(uid, "manual_order", f"order={oid};service={sid};price={price}")
 
     auto_delivered = False
@@ -2077,20 +2323,21 @@ async def finalize_customer_order(update, context):
         except TelegramError as exc:
             log.warning("Automatic free media delivery failed for order %s: %s", oid, exc)
 
+    paid_content_delivered = False
     if category != "free":
-        paid_media_delivered = await deliver_paid_service_attachment(context, uid, sid, context.user_data["order_service_name"], oid)
-    else:
-        paid_media_delivered = False
+        paid_content_delivered = await deliver_paid_service_attachment(
+            context, uid, sid, context.user_data["order_service_name"], oid
+        )
 
-    order_message = (
-        ("📎 تم تسليم مرفق الخدمة تلقائياً.\n" if paid_media_delivered else "") +
-        "🎁 تم تسليم ملف العرض المجاني تلقائياً.\n"
-        "📌 يمكنك متابعة العملية من «طلباتي»."
-        if auto_delivered else
-        "⏳ سيتم تنفيذ وتفعيل طلبك خلال أقل وقت ممكن.\n"
-        "📌 يمكنك متابعة حالة الطلب من «طلباتي».\n\n"
-        "🆘 إذا لم تستلم طلبك، استخدم زر التواصل مع الإدارة من تفاصيل الطلب."
-    )
+    if auto_delivered:
+        order_message = "🎁 تم تسليم ملف العرض المجاني تلقائياً.\n📌 يمكنك متابعة العملية من «طلباتي»."
+    else:
+        order_message = (
+            ("📎 تم تسليم النص أو الرابط أو المرفق الخاص بالخدمة تلقائياً.\n" if paid_content_delivered else "")
+            + "⏳ سيتم تنفيذ وتفعيل طلبك خلال أقل وقت ممكن.\n"
+            "📌 يمكنك متابعة حالة الطلب من «طلباتي».\n\n"
+            "🆘 إذا لم تستلم طلبك، استخدم زر التواصل مع الإدارة من تفاصيل الطلب."
+        )
     await send_or_edit(
         update,
         f"✅ **تم استلام طلبك بنجاح**\n\n"
@@ -2313,7 +2560,13 @@ async def admin_callback(update, context):
         context.user_data.clear()
         await admin_services(update)
     elif data == "service_menu":
-        await admin_service_menu(update)
+        await admin_services(update)
+    elif data.startswith("services_by_category:"):
+        category = data.split(":", 1)[1]
+        await admin_services_by_category(update, category)
+    elif data.startswith("add_service_in_category:"):
+        category = data.split(":", 1)[1]
+        await admin_add_service_prompt(update, context, preset_category=category)
     elif data.startswith("service:"):
         await admin_service_detail(update, int(data.split(":", 1)[1]))
     elif data.startswith("serviceedit:"):
@@ -2324,10 +2577,10 @@ async def admin_callback(update, context):
             "price": "💵 أرسل السعر الجديد بالأرقام فقط، مثال: 5.50",
             "duration": "⏳ أرسل مدة الاشتراك الجديدة، أو اكتب: غير محدد",
             "activation": "⚡ أرسل مدة التفعيل أو التسليم الجديدة، أو اكتب: غير محدد",
-            "pre_message": "💬 أرسل الرسالة التي تظهر للعميل قبل شراء هذه الخدمة. يمكنك تضمين رابط موقع الأداة.",
-            "content_text": "📝 أرسل النص الذي سيظهر للعميل قبل الشراء. أرسل - لمسحه.",
-            "content_link": "🔗 أرسل رابط الخدمة الذي سيظهر للعميل قبل الشراء، أو أرسل - لمسحه.",
-            "request_prompt": "🧾 أرسل ما تريد أن يكتبه العميل لتنفيذ الخدمة، مثل الإيميل أو الرقم أو تفاصيل الطلب.",
+            "pre_message": "💬 أرسل الملاحظة التي تظهر للعميل قبل شراء هذه الخدمة، أو أرسل - لمسحها.",
+            "content_text": "📝 أرسل النص الذي يُسلّم للعميل بعد نجاح الشراء، أو أرسل - لمسحه.",
+            "content_link": "🔗 أرسل الرابط الذي يُسلّم للعميل بعد نجاح الشراء، أو أرسل - لمسحه.",
+            "request_prompt": "🧾 أرسل ما تريد أن يكتبه العميل لتنفيذ الخدمة، أو أرسل - لمسحه.",
         }
         if field not in prompts:
             await q.answer("❌ حقل غير صالح.", show_alert=True)
@@ -2357,6 +2610,22 @@ async def admin_callback(update, context):
                 [red_button("🚫 إلغاء", callback_data=f"adm:service:{sid}")],
                 *admin_navigation_rows("adm:services", "الخدمات"),
             ]),
+        )
+    elif data.startswith("attachpaidphoto:"):
+        sid = int(data.split(":", 1)[1])
+        context.user_data.clear()
+        context.user_data.update({"admin_state": "service_edit_paid_photo", "service_file_id": sid})
+        await q.message.edit_text(
+            "🖼️ أرسل الآن الصورة التي ستصل للعميل تلقائياً بعد نجاح الشراء.",
+            reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data=f"adm:service:{sid}")], *admin_navigation_rows("adm:services", "الخدمات")]),
+        )
+    elif data.startswith("attachpaiddocument:"):
+        sid = int(data.split(":", 1)[1])
+        context.user_data.clear()
+        context.user_data.update({"admin_state": "service_edit_paid_document", "service_file_id": sid})
+        await q.message.edit_text(
+            "📄 أرسل الآن الملف الذي سيصل للعميل تلقائياً بعد نجاح الشراء.",
+            reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data=f"adm:service:{sid}")], *admin_navigation_rows("adm:services", "الخدمات")]),
         )
     elif data.startswith("service_category:"):
         _prefix, sid, category = data.split(":", 2)
@@ -2661,7 +2930,11 @@ async def admin_callback(update, context):
 
 async def admin_external_services(update, context, page=0):
     if not external_api_configured():
-        await send_or_edit(update, "🛒 **الخدمات الخارجية**\n\n⚠️ لم يتم إعداد API المورد بعد. أضف EXTERNAL_API_URL وEXTERNAL_API_KEY في Render.", InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]))
+        await send_or_edit(
+            update,
+            "🛒 **الخدمات الخارجية**\n\n⚠️ لم يتم إعداد API المورد بعد. أضف EXTERNAL_API_URL وEXTERNAL_API_KEY وEXTERNAL_API_PROVIDER في Render فقط.",
+            InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]),
+        )
         return
     try:
         items = external_services_list()
@@ -2690,28 +2963,72 @@ async def admin_external_services(update, context, page=0):
 
 
 async def admin_services(update):
+    """Show an admin-only category selector instead of a mixed list of all services."""
+    counts = {
+        category: db_execute(
+            """
+            SELECT COUNT(*) FROM services
+            WHERE LOWER(TRIM(COALESCE(category_key,'')))=%s
+            """,
+            (category,),
+            fetch=True,
+        )[0]
+        for category in CATEGORY_INFO
+    }
+    text = (
+        "🛠️ **إدارة الخدمات حسب القسم**\n\n"
+        "اختر القسم أولاً، ثم تظهر خدمات ذلك القسم فقط. "
+        "يمكنك إضافة خدمة جديدة مباشرة داخل القسم المختار.\n"
+    )
+    keyboard = []
+    for category, (title, _description) in CATEGORY_INFO.items():
+        keyboard.append([
+            green_button(
+                f"{title} — {counts[category]} خدمة",
+                callback_data=f"adm:services_by_category:{category}",
+            )
+        ])
+    keyboard.extend(admin_navigation_rows())
+    await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
+
+
+async def admin_services_by_category(update, category):
+    """Show only services belonging to the manager-selected category."""
+    cat = CATEGORY_INFO.get(category)
+    if not cat:
+        await send_or_edit(
+            update,
+            "❌ القسم غير متاح.",
+            InlineKeyboardMarkup([[red_button("↩️ الأقسام", callback_data="adm:services")]]),
+        )
+        return
     rows = db_execute(
         """
-        SELECT id,name,category_key,price,delivery_mode,COALESCE(active,TRUE)
-        FROM services ORDER BY id DESC
+        SELECT id,name,price,delivery_mode,COALESCE(active,TRUE)
+        FROM services
+        WHERE LOWER(TRIM(COALESCE(category_key,'')))=%s
+        ORDER BY id DESC
         """,
+        (category,),
         fetchall=True,
     )
     text = (
-        "🛠️ **إدارة الخدمات**\n\n"
-        "اضغط اسم أي خدمة لفتح لوحة تفاصيلها وتعديل بياناتها.\n\n"
+        f"🛠️ **إدارة قسم: {cat[0]}**\n\n"
+        "تظهر هنا خدمات هذا القسم فقط. اضغط اسم الخدمة لتعديلها.\n\n"
     )
-    keyboard = [[green_button("➕ إضافة خدمة", callback_data="adm:add_service")]]
+    keyboard = [[green_button("➕ إضافة خدمة داخل هذا القسم", callback_data=f"adm:add_service_in_category:{category}")]]
     if not rows:
-        text += "لا توجد خدمات مضافة حتى الآن."
+        text += "لا توجد خدمات مضافة في هذا القسم حتى الآن."
     else:
-        for sid, name, cat, price, mode, active in rows:
+        for sid, name, price, mode, active in rows:
             status = "🟢 ظاهرة" if active else "🔴 مؤرشفة"
-            text += f"▪️ #{sid} {name} — {money(price)}$ — {status}\n"
-            keyboard.append([
-                green_button(f"📦 #{sid} {name[:45]}", callback_data=f"adm:service:{sid}")
-            ])
-    keyboard.extend(admin_navigation_rows())
+            mode_label = "📦 مخزون" if mode == "stock" else ("🌐 خارجي" if mode == "external" else "🛠️ يدوي")
+            text += f"▪️ #{sid} {name} — {money(price)}$ — {mode_label} — {status}\n"
+            keyboard.append([green_button(f"📦 #{sid} {name[:45]}", callback_data=f"adm:service:{sid}")])
+    keyboard.extend([
+        [red_button("↩️ الأقسام", callback_data="adm:services")],
+        *admin_navigation_rows(),
+    ])
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -2724,7 +3041,8 @@ async def admin_service_detail(update, sid):
         """
         SELECT id,name,category_key,description,subscription_duration,activation_time,
                price,delivery_mode,needs_email,needs_note,needs_phone,COALESCE(active,TRUE),file_id,
-               file_kind,pre_purchase_message,service_content_text,service_content_link,customer_request_prompt
+               file_kind,pre_purchase_message,service_content_text,service_content_link,
+               service_photo_file_id,service_document_file_id,customer_request_prompt
         FROM services WHERE id=%s
         """,
         (sid,),
@@ -2734,7 +3052,10 @@ async def admin_service_detail(update, sid):
         await send_or_edit(
             update,
             "❌ الخدمة غير موجودة أو تم حذفها سابقاً.",
-            InlineKeyboardMarkup(admin_navigation_rows("adm:services", "الخدمات")),
+            InlineKeyboardMarkup([
+                [red_button("↩️ الأقسام", callback_data="adm:services")],
+                *admin_navigation_rows(),
+            ]),
         )
         return
     stock = db_execute(
@@ -2761,11 +3082,13 @@ async def admin_service_detail(update, sid):
         f"📝 طلب ملاحظة: {'نعم ✅' if row[9] else 'لا ❌'}\n"
         f"📱 طلب رقم هاتف: {'نعم ✅' if row[10] else 'لا ❌'}\n"
         f"📁 ملف مرفق: {'موجود ✅' if row[12] else 'لا يوجد'}\n"
-        f"📎 نوع المرفق: {row[13] or '—'}\n"
-        f"💬 رسالة قبل الشراء: {row[14] or 'لا توجد'}\n"
-        f"📝 محتوى قبل الشراء: {row[15] or 'لا يوجد'}\n"
-        f"🔗 رابط قبل الشراء: {row[16] or 'لا يوجد'}\n"
-        f"🧾 تفاصيل مطلوبة من العميل: {row[17] or 'لا توجد'}\n"
+        f"📎 نوع المرفق القديم: {row[13] or '—'}\n"
+        f"💬 ملاحظة قبل الشراء: {row[14] or 'لا توجد'}\n"
+        f"📝 نص يُسلّم بعد الدفع: {row[15] or 'لا يوجد'}\n"
+        f"🔗 رابط يُسلّم بعد الدفع: {row[16] or 'لا يوجد'}\n"
+        f"🖼️ صورة تُسلّم بعد الدفع: {'موجودة ✅' if row[17] else 'لا توجد'}\n"
+        f"📄 ملف يُسلّم بعد الدفع: {'موجود ✅' if row[18] else 'لا يوجد'}\n"
+        f"🧾 تفاصيل مطلوبة من العميل: {row[19] or 'لا توجد'}\n"
         f"👁️ الحالة: {status}"
     )
     keyboard = [
@@ -2774,12 +3097,14 @@ async def admin_service_detail(update, sid):
         [green_button("💵 تعديل السعر", callback_data=f"adm:serviceedit:{sid}:price"),
          green_button("⏳ تعديل المدة", callback_data=f"adm:serviceedit:{sid}:duration")],
         [green_button("⚡ تعديل التفعيل", callback_data=f"adm:serviceedit:{sid}:activation"),
-         green_button("💬 رسالة قبل الشراء", callback_data=f"adm:serviceedit:{sid}:pre_message")],
-        [green_button("📝 تعديل النص", callback_data=f"adm:serviceedit:{sid}:content_text"),
-         green_button("🔗 تعديل الرابط", callback_data=f"adm:serviceedit:{sid}:content_link")],
+         green_button("💬 ملاحظة قبل الشراء", callback_data=f"adm:serviceedit:{sid}:pre_message")],
+        [green_button("📝 تعديل النص بعد الدفع", callback_data=f"adm:serviceedit:{sid}:content_text"),
+         green_button("🔗 تعديل الرابط بعد الدفع", callback_data=f"adm:serviceedit:{sid}:content_link")],
         [green_button("🧾 تفاصيل مطلوبة من العميل", callback_data=f"adm:serviceedit:{sid}:request_prompt")],
+        [green_button("🖼️ رفع/استبدال صورة", callback_data=f"adm:attachpaidphoto:{sid}"),
+         green_button("📄 رفع/استبدال ملف", callback_data=f"adm:attachpaiddocument:{sid}")],
         [green_button("📦 إضافة أكواد", callback_data=f"adm:addstock:{sid}"),
-         green_button("📎 رفع ملف/صورة", callback_data=f"adm:attachfile:{sid}")],
+         green_button("📎 مرفق توافق قديم", callback_data=f"adm:attachfile:{sid}")],
         [green_button("⚡ الأدوات", callback_data=f"adm:service_category:{sid}:digital"),
          green_button("🔵 الاشتراكات", callback_data=f"adm:service_category:{sid}:subscriptions")],
         [green_button("🔧 الإيجار", callback_data=f"adm:service_category:{sid}:rentals"),
@@ -2792,13 +3117,29 @@ async def admin_service_detail(update, sid):
         [green_button("📱 تبديل الهاتف", callback_data=f"adm:service_toggle:{sid}:needs_phone"),
          red_button("👁️ إخفاء/إظهار", callback_data=f"adm:service_toggle:{sid}:active")],
         [red_button("🗑️ أرشفة الخدمة", callback_data=f"adm:delete_service:{sid}")],
-        [red_button("↩️ كل الخدمات", callback_data="adm:services")],
+        [red_button("↩️ خدمات هذا القسم", callback_data=f"adm:services_by_category:{row[2]}")],
+        [red_button("↩️ كل الأقسام", callback_data="adm:services")],
         *admin_navigation_rows(),
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
 
-async def admin_add_service_prompt(update, context):
+async def admin_add_service_prompt(update, context, preset_category=None):
+    if preset_category in CATEGORY_INFO:
+        context.user_data.clear()
+        context.user_data["service_category"] = preset_category
+        context.user_data["admin_state"] = "service_name"
+        await update.callback_query.message.edit_text(
+            f"➕ **إضافة خدمة إلى قسم {CATEGORY_INFO[preset_category][0]}**\n\n"
+            "أرسل **اسم الخدمة** الآن.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data=f"adm:services_by_category:{preset_category}")],
+                *admin_navigation_rows(),
+            ]),
+        )
+        return
+
     context.user_data.clear()
     context.user_data["admin_state"] = "service_category_button"
     await update.callback_query.message.edit_text(
@@ -3718,15 +4059,15 @@ async def admin_text(update, context):
                 return
             column = "price"
         else:
-            if field in {"content_text", "content_link"} and text.strip() == "-":
+            if text == "-" and field in {"pre_message", "content_text", "content_link", "request_prompt"}:
                 value = ""
+            elif not text or len(text) > (120 if field == "name" else 3500):
+                await update.message.reply_text("❌ القيمة فارغة أو أطول من الحد المسموح.")
+                return
             else:
-                if not text or len(text) > (120 if field == "name" else 1800):
-                    await update.message.reply_text("❌ القيمة فارغة أو أطول من الحد المسموح.")
-                    return
                 value = text
             if field == "content_link" and value and not (value.startswith("https://") or value.startswith("http://") or value.startswith("tg://")):
-                await update.message.reply_text("❌ الرابط يجب أن يبدأ بـ https:// أو http:// أو tg://، أو أرسل - لمسحه.")
+                await update.message.reply_text("❌ أرسل رابطاً يبدأ بـ https:// أو http:// أو tg://، أو أرسل - لمسحه.")
                 return
             column = columns.get(field)
         if not sid or not column:
@@ -3850,73 +4191,75 @@ async def admin_text(update, context):
         return
 
     if state == "service_options":
-        options = set() if text.lower() == "none" else {x.strip().lower() for x in text.split(",")}
+        options = set() if text.lower() == "none" else {
+            x.strip().lower() for x in text.split(",")
+        }
         bad = options - {"email", "note", "phone"}
         if bad:
             await update.message.reply_text("❌ خيار غير معروف.")
             return
-        context.user_data["service_options"] = sorted(options)
+
+        d = context.user_data
+        d["service_options"] = sorted(options)
+        if d.get("service_category") in {"subscriptions", "vip"}:
+            d["admin_state"] = "service_request_prompt"
+            label = "الاشتراك" if d.get("service_category") == "subscriptions" else "خدمة VIP"
+            await update.message.reply_text(
+                f"🧾 أرسل الرسالة التي تطلب بها تفاصيل العميل لتنفيذ {label}، أو أرسل - لتخطيها.\n\n"
+                "مثال: أرسل الإيميل المسجل، رقم الهاتف، أو اكتب تفاصيل طلبك."
+            )
+            return
+        d["admin_state"] = "service_pre_message"
+        await update.message.reply_text("💬 أرسل ملاحظة تظهر للعميل قبل الشراء، أو أرسل - لتخطيها.")
+        return
+
+    if state == "service_request_prompt":
+        prompt = "" if text.strip() == "-" else text.strip()[:1800]
+        if text.strip() != "-" and not prompt:
+            await update.message.reply_text("❌ أرسل رسالة واضحة أو أرسل - لتخطيها.")
+            return
+        context.user_data["service_request_prompt"] = prompt
         context.user_data["admin_state"] = "service_pre_message"
-        await update.message.reply_text("💬 أرسل الملاحظة التي تظهر للعميل قبل الشراء، أو أرسل - لتخطيها.")
+        await update.message.reply_text("💬 أرسل ملاحظة تظهر للعميل قبل الشراء، أو أرسل - لتخطيها.")
         return
 
     if state == "service_pre_message":
-        context.user_data["service_pre_message"] = "" if text.strip() == "-" else text[:1800]
+        context.user_data["service_pre_message"] = "" if text == "-" else text[:1800]
         context.user_data["admin_state"] = "service_content_text"
-        await update.message.reply_text("📝 أرسل النص الذي سيظهر للعميل قبل الشراء، أو أرسل - لتخطيه.")
+        await update.message.reply_text("📝 أرسل النص الذي يُسلّم للعميل بعد نجاح الشراء، أو أرسل - لتخطيه.")
         return
 
     if state == "service_content_text":
-        context.user_data["service_content_text"] = "" if text.strip() == "-" else text[:3500]
+        context.user_data["service_content_text"] = "" if text == "-" else text[:3500]
         context.user_data["admin_state"] = "service_content_link"
-        await update.message.reply_text("🔗 أرسل الرابط الذي سيظهر للعميل قبل الشراء، أو أرسل - لتخطيه.")
+        await update.message.reply_text("🔗 أرسل الرابط الذي يُسلّم للعميل بعد نجاح الشراء، أو أرسل - لتخطيه.")
         return
 
     if state == "service_content_link":
-        link = "" if text.strip() == "-" else text.strip()
+        link = "" if text == "-" else text.strip()
         if link and not (link.startswith("https://") or link.startswith("http://") or link.startswith("tg://")):
             await update.message.reply_text("❌ أرسل رابطاً يبدأ بـ https:// أو http:// أو tg://، أو أرسل - لتخطيه.")
             return
         context.user_data["service_content_link"] = link
         context.user_data["admin_state"] = "service_add_photo"
-        await update.message.reply_text("🖼️ أرسل صورة الخدمة لتسليمها بعد نجاح الشراء، أو أرسل - لتخطي الصورة.")
+        await update.message.reply_text("🖼️ أرسل صورة تُسلّم للعميل بعد نجاح الشراء، أو أرسل - لتخطيها.")
         return
 
     if state == "service_add_photo":
-        if text.strip() != "-":
+        if text != "-":
             await update.message.reply_text("❌ أرسل الصورة كصورة تيليجرام، أو أرسل - لتخطيها.")
             return
-        context.user_data["service_add_photo_id"] = ""
-        context.user_data["service_add_file_kind"] = ""
+        context.user_data["service_add_photo_file_id"] = ""
         context.user_data["admin_state"] = "service_add_document"
-        await update.message.reply_text("📎 أرسل ملف الخدمة لتسليمه بعد نجاح الشراء، أو أرسل - لإنشاء الخدمة بدون ملف.")
+        await update.message.reply_text("📄 أرسل ملفاً يُسلّم للعميل بعد نجاح الشراء، أو أرسل - لإنشاء الخدمة.")
         return
 
     if state == "service_add_document":
-        if text.strip() != "-":
+        if text != "-":
             await update.message.reply_text("❌ أرسل الملف كمستند تيليجرام، أو أرسل - لإنشاء الخدمة.")
             return
-        if context.user_data.get("service_category") in {"subscriptions", "vip"}:
-            context.user_data["admin_state"] = "service_request_prompt"
-            label = "الاشتراك" if context.user_data.get("service_category") == "subscriptions" else "خدمة VIP"
-            await update.message.reply_text(
-                f"🧾 أرسل الرسالة التي تطلب بها تفاصيل العميل لتنفيذ {label}.\n\n"
-                "مثال: أرسل الإيميل المسجل، رقم الهاتف، أو اكتب تفاصيل طلبك."
-            )
-            return
-        await finish_regular_service_creation(update, context, context.user_data.get("service_add_photo_id", ""), context.user_data.get("service_add_file_kind", ""))
-        return
-
-    if state == "service_request_prompt":
-        prompt = text.strip()[:1800]
-        if not prompt:
-            await update.message.reply_text("❌ أرسل رسالة واضحة يراها العميل قبل إرسال تفاصيله.")
-            return
-        context.user_data["service_request_prompt"] = prompt
         await finish_regular_service_creation(
-            update, context,
-            context.user_data.get("service_add_photo_id", ""),
-            context.user_data.get("service_add_file_kind", ""),
+            update, context, context.user_data.get("service_add_photo_file_id", ""), ""
         )
         return
 
@@ -4144,7 +4487,7 @@ def build_application():
     application.add_handler(
         CallbackQueryHandler(
             callback_router,
-            pattern=r"^(check_sub|main|flowcancel:|cat:|service:|buyconfirm:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
+            pattern=r"^(check_sub|main|flowcancel:|free_offer_timer:|cat:|service:|buyconfirm:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
         )
     )
 
