@@ -40,6 +40,7 @@ from psycopg2 import pool
 
 from telegram import (
     Update,
+    MessageEntity,
     InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -432,6 +433,7 @@ def init_db():
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_content_link TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_photo_file_id TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_document_file_id TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS name_entities_json TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_content_text TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_content_link TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_photo_file_id TEXT DEFAULT ''",
@@ -596,6 +598,46 @@ def init_db():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def custom_emoji_entities_from_message(message):
+    """Serialize only Custom Emoji entities from an admin service-name message."""
+    raw_text = getattr(message, "text", "") or ""
+    entities = []
+    for entity in getattr(message, "entities", None) or []:
+        if getattr(entity, "type", "") != "custom_emoji":
+            continue
+        emoji_id = getattr(entity, "custom_emoji_id", None)
+        if not emoji_id:
+            continue
+        entities.append({
+            "type": "custom_emoji",
+            "offset": int(entity.offset),
+            "length": int(entity.length),
+            "custom_emoji_id": str(emoji_id),
+        })
+    return json.dumps(entities, ensure_ascii=False) if entities else ""
+
+
+def custom_emoji_entities_from_json(value):
+    """Build MessageEntity objects; malformed historical values simply fall back to text."""
+    if not value:
+        return []
+    try:
+        raw = json.loads(value) if isinstance(value, str) else value
+        result = []
+        for item in raw if isinstance(raw, list) else []:
+            if item.get("type") != "custom_emoji" or not item.get("custom_emoji_id"):
+                continue
+            result.append(MessageEntity(
+                type="custom_emoji",
+                offset=int(item["offset"]),
+                length=int(item["length"]),
+                custom_emoji_id=str(item["custom_emoji_id"]),
+            ))
+        return result
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return []
 
 def now():
     return datetime.now()
@@ -895,29 +937,23 @@ def main_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 
-async def send_or_edit(update, text, markup=None):
+async def send_or_edit(update, text, markup=None, entities=None):
+    # Telegram does not allow combining custom entities with parse_mode reliably.
+    message_kwargs = {
+        "reply_markup": markup,
+        "disable_web_page_preview": True,
+    }
+    if entities:
+        message_kwargs["entities"] = entities
+    else:
+        message_kwargs["parse_mode"] = ParseMode.MARKDOWN
     if update.callback_query:
         try:
-            await update.callback_query.message.edit_text(
-                text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
-            )
+            await update.callback_query.message.edit_text(text, **message_kwargs)
         except Exception:
-            await update.callback_query.message.reply_text(
-                text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
-            )
+            await update.callback_query.message.reply_text(text, **message_kwargs)
     else:
-        await update.message.reply_text(
-            text,
-            reply_markup=markup,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
-        )
+        await update.message.reply_text(text, **message_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1190,7 +1226,7 @@ async def show_service(update, sid):
         """
         SELECT id,category_key,name,description,subscription_duration,
                activation_time,price,delivery_mode,needs_email,needs_note,
-               needs_phone,pre_purchase_message
+               needs_phone,pre_purchase_message,name_entities_json
         FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
         """,
         (sid,),
@@ -1212,13 +1248,23 @@ async def show_service(update, sid):
 
     duration_label = "مدة الإيجار" if srv[1] == "rentals" else "مدة الاشتراك"
     activation_label = "وقت تسليم بيانات الإيجار" if srv[1] == "rentals" else "مدة التفعيل/التسليم"
-    text = (
-        f"📌 **{srv[2]}**\n\n"
-        f"📝 **الوصف:** {srv[3] or 'غير محدد'}\n"
+    service_entities = custom_emoji_entities_from_json(srv[12] if len(srv) > 12 else "")
+    if service_entities:
+        text = (
+            f"{srv[2]}\n\n"
+            f"📝 الوصف: {srv[3] or 'غير محدد'}\n"
         f"⏳ **{duration_label}:** {srv[4] or 'حسب الخدمة'}\n"
         f"⚡ **{activation_label}:** {srv[5] or 'حسب الخدمة'}\n"
-        f"💵 **السعر:** {money(srv[6])}$\n"
-    )
+            f"💵 السعر: {money(srv[6])}$\n"
+        )
+    else:
+        text = (
+            f"📌 **{srv[2]}**\n\n"
+            f"📝 **الوصف:** {srv[3] or 'غير محدد'}\n"
+            f"⏳ **{duration_label}:** {srv[4] or 'حسب الخدمة'}\n"
+            f"⚡ **{activation_label}:** {srv[5] or 'حسب الخدمة'}\n"
+            f"💵 **السعر:** {money(srv[6])}$\n"
+        )
     if srv[11]:
         text += f"\nℹ️ **تعليمات قبل الطلب:**\n{srv[11]}\n"
     if srv[7] == "stock":
@@ -1241,7 +1287,7 @@ async def show_service(update, sid):
         [red_button("↩️ رجوع للقسم", callback_data=f"cat:{srv[1]}")],
         [red_button("🏠 الرئيسية", callback_data="main")],
     ]
-    await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
+    await send_or_edit(update, text, InlineKeyboardMarkup(keyboard), entities=service_entities)
 
 
 # ---------------------------------------------------------------------------
@@ -1495,14 +1541,15 @@ def create_free_offer_service(data, document_file_id=""):
         INSERT INTO services(
             category_key,name,description,subscription_duration,activation_time,
             price,delivery_mode,needs_email,needs_note,needs_phone,active,
-            free_content_text,free_content_link,free_photo_file_id,free_document_file_id
-        ) VALUES('free',%s,%s,'','',0,'manual',FALSE,FALSE,FALSE,TRUE,%s,%s,%s,%s)
+            free_content_text,free_content_link,free_photo_file_id,free_document_file_id,name_entities_json
+        ) VALUES('free',%s,%s,'','',0,'manual',FALSE,FALSE,FALSE,TRUE,%s,%s,%s,%s,%s)
         RETURNING id
         """,
         (
             data["service_name"], data["service_description"],
             data.get("free_content_text", ""), data.get("free_content_link", ""),
             data.get("free_photo_file_id", ""), document_file_id,
+            data.get("service_name_entities_json", ""),
         ),
         fetch=True,
     )
@@ -1528,8 +1575,8 @@ async def finish_regular_service_creation(update, context, photo_file_id="", doc
         INSERT INTO services(
             category_key,name,description,subscription_duration,activation_time,price,delivery_mode,
             needs_email,needs_note,needs_phone,pre_purchase_message,service_content_text,service_content_link,
-            service_photo_file_id,service_document_file_id,file_id,file_kind,customer_request_prompt,active
-        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+            service_photo_file_id,service_document_file_id,file_id,file_kind,customer_request_prompt,name_entities_json,active
+        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
         RETURNING id
         """,
         (
@@ -1542,6 +1589,7 @@ async def finish_regular_service_creation(update, context, photo_file_id="", doc
             photo_file_id or document_file_id,
             "photo" if photo_file_id else ("document" if document_file_id else ""),
             d.get("service_request_prompt", ""),
+            d.get("service_name_entities_json", ""),
         ),
         fetch=True,
     )
@@ -2626,6 +2674,7 @@ async def admin_callback(update, context):
         prompts = {
             "name": "✏️ أرسل الاسم الجديد للخدمة:",
             "description": "📝 أرسل الوصف الجديد للخدمة:",
+            "emoji": "🎞️ أرسل اسم الخدمة أو رمز Custom Emoji المتحرك في رسالة واحدة، أو أرسل - لمسحه.",
             "price": "💵 أرسل السعر الجديد بالأرقام فقط، مثال: 5.50",
             "duration": "⏳ أرسل مدة الاشتراك الجديدة، أو اكتب: غير محدد",
             "activation": "⚡ أرسل مدة التفعيل أو التسليم الجديدة، أو اكتب: غير محدد",
@@ -2639,7 +2688,7 @@ async def admin_callback(update, context):
             return
         context.user_data.clear()
         context.user_data.update({
-            "admin_state": "service_edit_field",
+            "admin_state": "service_edit_emoji" if field == "emoji" else "service_edit_field",
             "service_edit_id": int(sid),
             "service_edit_field": field,
         })
@@ -3096,7 +3145,7 @@ async def admin_service_detail(update, sid):
         SELECT id,name,category_key,description,subscription_duration,activation_time,
                price,delivery_mode,needs_email,needs_note,needs_phone,COALESCE(active,TRUE),file_id,
                file_kind,pre_purchase_message,service_content_text,service_content_link,
-               service_photo_file_id,service_document_file_id,customer_request_prompt
+               service_photo_file_id,service_document_file_id,customer_request_prompt,name_entities_json
         FROM services WHERE id=%s
         """,
         (sid,),
@@ -3148,6 +3197,7 @@ async def admin_service_detail(update, sid):
     keyboard = [
         [green_button("✏️ تعديل الاسم", callback_data=f"adm:serviceedit:{sid}:name"),
          green_button("📝 تعديل الوصف", callback_data=f"adm:serviceedit:{sid}:description")],
+        [green_button("🎞️ الإيموجي المتحرك", callback_data=f"adm:serviceedit:{sid}:emoji")],
         [green_button("💵 تعديل السعر", callback_data=f"adm:serviceedit:{sid}:price"),
          green_button("⏳ تعديل المدة", callback_data=f"adm:serviceedit:{sid}:duration")],
         [green_button("⚡ تعديل التفعيل", callback_data=f"adm:serviceedit:{sid}:activation"),
@@ -4187,6 +4237,25 @@ async def admin_text(update, context):
         await update.message.reply_text(f"✅ تم رفض السند #{receipt_id} وإشعار العميل.")
         return
 
+    if state == "service_edit_emoji":
+        sid = context.user_data.get("service_edit_id")
+        if not sid:
+            context.user_data.clear()
+            await update.message.reply_text("⚠️ انتهت جلسة التعديل. افتح الخدمة من جديد.")
+            return
+        if text == "-":
+            entity_json = ""
+        else:
+            entity_json = custom_emoji_entities_from_message(update.message)
+            if not entity_json:
+                await update.message.reply_text("❌ أرسل رسالة تحتوي Custom Emoji متحركاً، أو أرسل - لمسحه.")
+                return
+        db_execute("UPDATE services SET name_entities_json=%s WHERE id=%s", (entity_json, sid))
+        log_operation(None, "service_custom_emoji_updated", f"service={sid};cleared={not bool(entity_json)}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text("✅ تم تحديث الإيموجي المتحرك للخدمة.")
+        return
+
     if state == "service_edit_field":
         sid = context.user_data.get("service_edit_id")
         field = context.user_data.get("service_edit_field")
@@ -4217,6 +4286,8 @@ async def admin_text(update, context):
                 return
             else:
                 value = text
+            if field == "name":
+                entity_json = custom_emoji_entities_from_message(update.message)
             if field == "content_link" and value and not (value.startswith("https://") or value.startswith("http://") or value.startswith("tg://")):
                 await update.message.reply_text("❌ أرسل رابطاً يبدأ بـ https:// أو http:// أو tg://، أو أرسل - لمسحه.")
                 return
@@ -4226,16 +4297,20 @@ async def admin_text(update, context):
             await update.message.reply_text("⚠️ انتهت جلسة التعديل. افتح الخدمة من جديد.")
             return
         db_execute(f"UPDATE services SET {column}=%s WHERE id=%s", (value, sid))
+        if field == "name":
+            db_execute("UPDATE services SET name_entities_json=%s WHERE id=%s", (entity_json, sid))
         log_operation(None, "service_detail_updated", f"service={sid};field={column}", ADMIN_ID)
         context.user_data.clear()
         await update.message.reply_text("✅ تم حفظ التعديل بنجاح.")
         return
 
     if state == "service_name":
-        if not text or len(text) > 120:
+        raw_name = (update.message.text or "").strip()
+        if not raw_name or len(raw_name) > 120:
             await update.message.reply_text("❌ أرسل اسماً صحيحاً لا يزيد عن 120 حرفاً.")
             return
-        context.user_data["service_name"] = text
+        context.user_data["service_name"] = raw_name
+        context.user_data["service_name_entities_json"] = custom_emoji_entities_from_message(update.message)
         if context.user_data.get("service_category") == "free":
             context.user_data["admin_state"] = "free_offer_description"
             await update.message.reply_text("📝 أرسل وصفاً مختصراً للعرض المجاني:")
