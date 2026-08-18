@@ -152,6 +152,16 @@ def external_api_call(action, **fields):
     try:
         with urllib.request.urlopen(req, timeout=25) as response:
             raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        # HTTPError can include a JSON body with the supplier's real rejection reason.
+        # Read only structured error fields; never expose raw HTML or echoed request data.
+        try:
+            error_raw = exc.read().decode("utf-8", errors="replace")[:4096]
+            error_payload = json.loads(error_raw)
+            detail = external_error_summary(error_payload)
+        except Exception:
+            detail = "الخادم لم يرسل رسالة تشخيص آمنة قابلة للعرض"
+        raise RuntimeError(f"External API HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"External API connection failed: {exc}") from exc
     try:
@@ -3269,20 +3279,55 @@ async def admin_orders(update):
 
 
 async def admin_users(update):
-    rows = db_execute(
-        """
-        SELECT user_id,name,balance,join_date,is_blocked
-        FROM users ORDER BY join_date DESC LIMIT 30
-        """,
-        fetchall=True,
-    )
-    text = "👥 **آخر العملاء**\n\n"
-    for uid, name, balance, joined, blocked in rows:
-        text += f"▪️ {name} | `{uid}` | {money(balance)}$ | {'🚫' if blocked else '🟢'}\n"
+    """Show recent customers without assuming optional legacy columns exist."""
+    try:
+        rows = db_execute(
+            """
+            SELECT
+                u.user_id,
+                COALESCE(NULLIF(to_jsonb(u)->>'name',''),'عميل بدون اسم') AS name,
+                COALESCE(to_jsonb(u)->>'username','') AS username,
+                COALESCE(NULLIF(to_jsonb(u)->>'balance','')::NUMERIC,0) AS balance,
+                COALESCE(to_jsonb(u)->>'is_blocked','false') AS is_blocked
+            FROM users u
+            ORDER BY u.user_id DESC
+            LIMIT 25
+            """,
+            fetchall=True,
+        )
+    except Exception as exc:
+        log.exception("Unable to load admin users list: %s", exc)
+        await send_or_edit(
+            update,
+            "⚠️ تعذر تحميل قائمة العملاء مؤقتاً. أعد نشر آخر ملف `bot.py` ثم جرّب مجدداً.",
+            InlineKeyboardMarkup(admin_navigation_rows()),
+        )
+        return
+
+    if not rows:
+        await send_or_edit(
+            update,
+            "👥 **العملاء**\n\nلا يوجد عملاء مسجلون حتى الآن.",
+            InlineKeyboardMarkup(admin_navigation_rows()),
+        )
+        return
+
+    lines = ["👥 **آخر 25 عميلاً**", ""]
+    for uid, name, username, balance, blocked in rows:
+        # This screen uses Markdown. Remove only markup control characters from user-provided names.
+        clean_name = re.sub(r"[\*_`\[\]]", "", str(name or "عميل بدون اسم"))[:60]
+        clean_username = re.sub(r"[\*_`\[\]]", "", str(username or "")).strip().lstrip("@")[:32]
+        status = "🚫 محظور" if str(blocked).strip().lower() in {"true", "t", "1", "yes"} else "🟢 نشط"
+        username_line = f" | @{clean_username}" if clean_username else ""
+        lines.append(f"▪️ {clean_name} | `{uid}` | {money(balance)}$ | {status}{username_line}")
+
     await send_or_edit(
         update,
-        text or "لا يوجد عملاء.",
-        InlineKeyboardMarkup(admin_navigation_rows()),
+        "\n".join(lines),
+        InlineKeyboardMarkup([
+            [green_button("🔄 تحديث العملاء", callback_data="adm:users")],
+            *admin_navigation_rows(),
+        ]),
     )
 
 
