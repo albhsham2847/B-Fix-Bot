@@ -602,22 +602,31 @@ def init_db():
 
 
 def custom_emoji_entities_from_message(message):
-    """Serialize only Custom Emoji entities from an admin service-name message."""
-    raw_text = getattr(message, "text", "") or ""
-    entities = []
-    for entity in getattr(message, "entities", None) or []:
-        if getattr(entity, "type", "") != "custom_emoji":
+    """Read a real Telegram Custom Emoji entity without accepting ordinary Unicode emoji."""
+    entities = list(getattr(message, "entities", None) or [])
+    entities.extend(getattr(message, "caption_entities", None) or [])
+    found = []
+    for entity in entities:
+        if isinstance(entity, dict):
+            entity_type = entity.get("type", "")
+            emoji_id = entity.get("custom_emoji_id")
+            offset = entity.get("offset", 0)
+            length = entity.get("length", 0)
+        else:
+            entity_type = getattr(entity, "type", "")
+            entity_type = getattr(entity_type, "value", entity_type)
+            emoji_id = getattr(entity, "custom_emoji_id", None)
+            offset = getattr(entity, "offset", 0)
+            length = getattr(entity, "length", 0)
+        if str(entity_type) != "custom_emoji" or not emoji_id:
             continue
-        emoji_id = getattr(entity, "custom_emoji_id", None)
-        if not emoji_id:
-            continue
-        entities.append({
+        found.append({
             "type": "custom_emoji",
-            "offset": int(entity.offset),
-            "length": int(entity.length),
+            "offset": int(offset),
+            "length": int(length),
             "custom_emoji_id": str(emoji_id),
         })
-    return json.dumps(entities, ensure_ascii=False) if entities else ""
+    return json.dumps(found, ensure_ascii=False) if found else ""
 
 
 def custom_emoji_entities_from_json(value):
