@@ -488,6 +488,7 @@ def init_db():
         # إعدادات واجهة العميل: تعديل النص والإجراء والإخفاء بدون حذف الصفوف.
         "ALTER TABLE custom_buttons ADD COLUMN IF NOT EXISTS btn_action TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE custom_buttons ADD COLUMN IF NOT EXISTS is_visible BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE custom_buttons ADD COLUMN IF NOT EXISTS icon_custom_emoji_id TEXT DEFAULT ''",
         "UPDATE custom_buttons SET is_visible=TRUE WHERE is_visible IS NULL",
         # External reseller services: additive-only; existing services/orders are preserved.
         """CREATE TABLE IF NOT EXISTS external_service_map (
@@ -654,13 +655,20 @@ AUTO_MAINTENANCE_MESSAGE = (
 
 
 def styled_button(style, *args, **kwargs):
-    """Create a styled button with a safe fallback for older Telegram libraries."""
+    """Create a styled button and optionally pass a Telegram custom-emoji icon."""
+    icon_id = kwargs.pop("icon_custom_emoji_id", "") or ""
+    api_kwargs = dict(kwargs.pop("api_kwargs", {}) or {})
+    if icon_id:
+        api_kwargs["icon_custom_emoji_id"] = str(icon_id)
     plain_kwargs = dict(kwargs)
     styled_kwargs = dict(kwargs)
     styled_kwargs["style"] = style
+    if api_kwargs:
+        styled_kwargs["api_kwargs"] = api_kwargs
     try:
         return TelegramInlineKeyboardButton(*args, **styled_kwargs)
     except TypeError:
+        # Older clients retain the normal button and ignore the optional icon.
         return TelegramInlineKeyboardButton(*args, **plain_kwargs)
 
 
@@ -851,7 +859,7 @@ async def subscription_ok(update, context):
 
 def button_config(key, fallback_text, fallback_action):
     row = db_execute(
-        "SELECT btn_text,btn_action,COALESCE(is_visible,TRUE) FROM custom_buttons WHERE btn_key=%s",
+        "SELECT btn_text,btn_action,COALESCE(is_visible,TRUE),COALESCE(icon_custom_emoji_id,'') FROM custom_buttons WHERE btn_key=%s",
         (key,),
         fetch=True,
     )
@@ -860,7 +868,8 @@ def button_config(key, fallback_text, fallback_action):
     text = row[0] if len(row) > 0 else fallback_text
     action = row[1] if len(row) > 1 else fallback_action
     visible = row[2] if len(row) > 2 else True
-    return text or fallback_text, action or fallback_action, bool(visible)
+    icon_id = row[3] if len(row) > 3 else ""
+    return text or fallback_text, action or fallback_action, bool(visible), icon_id or ""
 
 
 def button_text(key, fallback):
@@ -868,13 +877,37 @@ def button_text(key, fallback):
 
 
 def configured_main_button(key, fallback_text, fallback_action):
-    text, action, visible = button_config(key, fallback_text, fallback_action)
+    text, action, visible, icon_id = button_config(key, fallback_text, fallback_action)
     if not visible:
         return None
     if action.startswith(("https://", "http://")):
-        return green_button(text, url=action)
-    return green_button(text, callback_data=action)
+        return green_button(text, url=action, icon_custom_emoji_id=icon_id)
+    return green_button(text, callback_data=action, icon_custom_emoji_id=icon_id)
 
+
+
+def plain_button_from_custom(button):
+    """Remove only optional Telegram custom-emoji/style fields from a button."""
+    data = button.to_dict() if hasattr(button, "to_dict") else {}
+    data.pop("icon_custom_emoji_id", None)
+    data.pop("style", None)
+    allowed = {
+        "text", "url", "callback_data", "web_app", "login_url",
+        "switch_inline_query", "switch_inline_query_current_chat",
+        "callback_game", "pay", "copy_text",
+    }
+    kwargs = {key: value for key, value in data.items() if key in allowed}
+    return TelegramInlineKeyboardButton(**kwargs)
+
+
+def plain_markup_from_custom(markup):
+    """Return a normal inline keyboard; return original markup if conversion is unnecessary."""
+    if not markup or not getattr(markup, "inline_keyboard", None):
+        return markup
+    rows = []
+    for row in markup.inline_keyboard:
+        rows.append([plain_button_from_custom(button) for button in row])
+    return InlineKeyboardMarkup(rows)
 
 def add_button_row(keyboard, *buttons):
     row = [button for button in buttons if button is not None]
@@ -894,13 +927,13 @@ def valid_custom_button_action(action):
 
 
 def visible_main_button(key, fallback_text, callback_data=None, url=None):
-    """Keep fixed core routes intact while allowing only their label/visibility to be managed."""
-    text, _stored_action, visible = button_config(key, fallback_text, callback_data or url or "")
+    """Keep fixed core routes intact while allowing label, visibility, and optional icon."""
+    text, _stored_action, visible, icon_id = button_config(key, fallback_text, callback_data or url or "")
     if not visible:
         return None
     if url:
-        return green_button(text, url=url)
-    return green_button(text, callback_data=callback_data)
+        return green_button(text, url=url, icon_custom_emoji_id=icon_id)
+    return green_button(text, callback_data=callback_data, icon_custom_emoji_id=icon_id)
 
 
 def main_keyboard():
@@ -947,13 +980,36 @@ async def send_or_edit(update, text, markup=None, entities=None):
         message_kwargs["entities"] = entities
     else:
         message_kwargs["parse_mode"] = ParseMode.MARKDOWN
-    if update.callback_query:
+
+    async def send_message(method, kwargs):
         try:
-            await update.callback_query.message.edit_text(text, **message_kwargs)
-        except Exception:
-            await update.callback_query.message.reply_text(text, **message_kwargs)
+            await method(text, **kwargs)
+            return True
+        except Exception as exc:
+            log.warning("Telegram message attempt failed; trying plain fallback: %s", exc)
+            return False
+
+    if update.callback_query:
+        method = update.callback_query.message.edit_text
+        if await send_message(method, message_kwargs):
+            return
+        fallback_kwargs = dict(message_kwargs)
+        fallback_kwargs["reply_markup"] = plain_markup_from_custom(markup)
+        if entities:
+            # A client that rejects the entity still receives the service text.
+            fallback_kwargs.pop("entities", None)
+        if await send_message(method, fallback_kwargs):
+            return
+        await update.callback_query.message.reply_text(text, **fallback_kwargs)
     else:
-        await update.message.reply_text(text, **message_kwargs)
+        method = update.message.reply_text
+        if await send_message(method, message_kwargs):
+            return
+        fallback_kwargs = dict(message_kwargs)
+        fallback_kwargs["reply_markup"] = plain_markup_from_custom(markup)
+        if entities:
+            fallback_kwargs.pop("entities", None)
+        await method(text, **fallback_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -2875,6 +2931,18 @@ async def admin_callback(update, context):
                 *admin_navigation_rows(),
             ]),
         )
+    elif data.startswith("editbuttonemoji:"):
+        key = data.split(":", 1)[1]
+        context.user_data.clear()
+        context.user_data["admin_state"] = "button_emoji"
+        context.user_data["edit_button_key"] = key
+        await q.message.edit_text(
+            "🎞️ أرسل Custom Emoji متحركاً وحده من لوحة الإيموجيات الخاصة، أو أرسل - لمسحه.",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:buttons")],
+                *admin_navigation_rows(),
+            ]),
+        )
     elif data.startswith("editbuttonaction:"):
         key = data.split(":", 1)[1]
         context.user_data.clear()
@@ -3696,7 +3764,7 @@ async def admin_test_channels(update, context):
 
 async def admin_buttons(update):
     rows = db_execute(
-        "SELECT btn_key,btn_text,btn_action,COALESCE(is_visible,TRUE) FROM custom_buttons ORDER BY btn_key",
+        "SELECT btn_key,btn_text,btn_action,COALESCE(is_visible,TRUE),COALESCE(icon_custom_emoji_id,'') FROM custom_buttons ORDER BY btn_key",
         fetchall=True,
     )
     text = (
@@ -3705,12 +3773,16 @@ async def admin_buttons(update):
         "الإخفاء قابل للاسترجاع ولا يحذف أي بيانات.\n\n"
     )
     keyboard = []
-    for key, label, action, visible in rows:
+    for key, label, action, visible, icon_id in rows:
         status = "🟢 ظاهر" if visible else "🔴 مخفي"
-        text += f"▪️ `{key}` — {status}\n   النص: {label}\n   الإجراء: {action or 'غير مضبوط'}\n\n"
+        icon_status = "مخصص ✅" if icon_id else "عادي"
+        text += f"▪️ `{key}` — {status}\n   النص: {label}\n   الإجراء: {action or 'غير مضبوط'}\n   الأيقونة: {icon_status}\n\n"
         keyboard.append([
             green_button("✏️ تعديل النص", callback_data=f"adm:editbutton:{key}"),
             green_button("🔗 تعديل الإجراء", callback_data=f"adm:editbuttonaction:{key}"),
+        ])
+        keyboard.append([
+            green_button("🎞️ تخصيص الإيموجي", callback_data=f"adm:editbuttonemoji:{key}"),
         ])
         keyboard.append([
             red_button("🙈 إخفاء الزر", callback_data=f"adm:togglebutton:{key}")
@@ -4551,6 +4623,27 @@ async def admin_text(update, context):
             (d["channel_name"], text),
         )
         await update.message.reply_text("✅ تمت إضافة رابط القناة الاختياري. لن يُطلب من العملاء الاشتراك فيها.")
+        context.user_data.clear()
+        return
+
+    if state == "button_emoji":
+        key = context.user_data["edit_button_key"]
+        if text == "-":
+            icon_id = ""
+        else:
+            entities = custom_emoji_entities_from_message(update.message)
+            if not entities:
+                await update.message.reply_text("❌ أرسل Custom Emoji متحركاً من لوحة Telegram، أو أرسل - لمسحه.")
+                return
+            try:
+                parsed = json.loads(entities)
+                icon_id = str(parsed[0]["custom_emoji_id"])
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                await update.message.reply_text("❌ تعذر قراءة Custom Emoji. أرسله وحده مرة أخرى.")
+                return
+        db_execute("UPDATE custom_buttons SET icon_custom_emoji_id=%s WHERE btn_key=%s", (icon_id, key))
+        log_operation(None, "button_custom_emoji_updated", f"button={key};cleared={not bool(icon_id)}", ADMIN_ID)
+        await update.message.reply_text("✅ تم تحديث إيموجي الزر الرئيسي.")
         context.user_data.clear()
         return
 
