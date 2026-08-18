@@ -27,6 +27,10 @@ import logging
 import asyncio
 import threading
 import re
+import json
+import urllib.request
+import urllib.parse
+import urllib.error
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
@@ -75,6 +79,9 @@ ADMIN_CONTACT_LINK = os.getenv(
     "https://t.me/bfixSoftware",
 ).strip()
 SUPPORT_LINK = os.getenv("SUPPORT_LINK", ADMIN_CONTACT_LINK).strip()
+# Optional external reseller API. Keep the secret in Render Environment Variables.
+EXTERNAL_API_URL = os.getenv("EXTERNAL_API_URL", "").strip()
+EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY", "").strip()
 FORCED_CHANNEL_LINK = os.getenv(
     "FORCED_CHANNEL_LINK",
     "https://t.me/+0QKwgEMQwHg2Y2U0",
@@ -113,6 +120,60 @@ def run_health_server():
 
 
 threading.Thread(target=run_health_server, daemon=True).start()
+
+# ---------------------------------------------------------------------------
+# External reseller API
+# ---------------------------------------------------------------------------
+
+def external_api_configured():
+    return bool(EXTERNAL_API_URL and EXTERNAL_API_KEY)
+
+
+def external_api_call(action, **fields):
+    if not external_api_configured():
+        raise RuntimeError("External API is not configured. Set EXTERNAL_API_URL and EXTERNAL_API_KEY.")
+    payload = {"key": EXTERNAL_API_KEY, "action": action}
+    payload.update({k: v for k, v in fields.items() if v is not None and v != ""})
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    req = urllib.request.Request(EXTERNAL_API_URL, data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"External API connection failed: {exc}") from exc
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("External API returned invalid JSON.") from exc
+
+
+def external_services_list():
+    data = external_api_call("services")
+    if isinstance(data, list):
+        return data
+    for key in ("services", "data", "result"):
+        if isinstance(data.get(key), list):
+            return data[key]
+    return []
+
+
+def external_add_order(provider_service_id, input_data=""):
+    data = external_api_call("add", service=provider_service_id, input=input_data)
+    return data
+
+
+def external_order_status(provider_order_id):
+    return external_api_call("status", order=provider_order_id)
+
+
+def provider_value(item, *keys, default=""):
+    if not isinstance(item, dict):
+        return default
+    for key in keys:
+        if key in item and item[key] not in (None, ""):
+            return item[key]
+    return default
 
 # ---------------------------------------------------------------------------
 # PostgreSQL
@@ -381,6 +442,18 @@ def init_db():
         "ALTER TABLE custom_buttons ADD COLUMN IF NOT EXISTS btn_action TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE custom_buttons ADD COLUMN IF NOT EXISTS is_visible BOOLEAN NOT NULL DEFAULT TRUE",
         "UPDATE custom_buttons SET is_visible=TRUE WHERE is_visible IS NULL",
+        # External reseller services: additive-only; existing services/orders are preserved.
+        """CREATE TABLE IF NOT EXISTS external_service_map (
+            service_id INTEGER PRIMARY KEY REFERENCES services(id) ON DELETE CASCADE,
+            provider_service_id TEXT NOT NULL UNIQUE,
+            provider_price NUMERIC(14,2) NOT NULL DEFAULT 0,
+            provider_name TEXT DEFAULT '',
+            provider_active BOOLEAN NOT NULL DEFAULT TRUE,
+            last_synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_order_id TEXT DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_status TEXT DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_refunded BOOLEAN NOT NULL DEFAULT FALSE",
     ]
     for sql in migrations:
         db_execute(sql)
@@ -1038,6 +1111,8 @@ async def show_category(update, category):
         )[0]
         if mode == "stock":
             status = f"🟢 {stock}" if stock else "🔴 نفد المخزون"
+        elif mode == "external":
+            status = "🟢 API"
         else:
             status = "🟢 متاح"
         keyboard.append([
@@ -1567,49 +1642,27 @@ async def begin_order(update, context, sid):
 async def claim_free_offer(update, context, srv):
     """Grant exactly one free-offer claim per customer without charging a balance."""
     uid, sid = update.effective_user.id, srv[0]
-    content = (srv[14] or "").strip()
-    link = (srv[15] or "").strip()
-    photo_id = (srv[16] or "").strip()
-    document_id = (srv[17] or "").strip()
-
-    # Services created in earlier updates stored one attachment in file_id/file_kind.
-    # Preserve that existing content instead of requiring the owner to recreate the offer.
-    legacy_file_id = (srv[11] or "").strip()
-    legacy_file_kind = (srv[12] or "").strip()
-    if not photo_id and legacy_file_kind == "photo":
-        photo_id = legacy_file_id
-    if not document_id and legacy_file_kind == "document":
-        document_id = legacy_file_id
-    if not any((content, link, photo_id, document_id)):
-        await update.callback_query.answer(
-            "⚠️ هذا العرض لم تُضف له رسالة أو رابط أو صورة أو ملف بعد.",
-            show_alert=True,
-        )
-        return
-
     conn = DB_POOL.getconn()
     try:
         with conn.cursor() as cur:
-            # المدير معفى من حد 24 ساعة لاختبار كل العروض؛ العملاء فقط هم المقيدون.
-            if uid != ADMIN_ID:
-                cur.execute(
-                    """
-                    INSERT INTO free_offer_claims(user_id,service_id,claimed_at)
-                    VALUES(%s,%s,CURRENT_TIMESTAMP)
-                    ON CONFLICT(user_id) DO UPDATE
-                    SET service_id=EXCLUDED.service_id,order_id=NULL,claimed_at=CURRENT_TIMESTAMP
-                    WHERE free_offer_claims.claimed_at <= CURRENT_TIMESTAMP - INTERVAL '24 hours'
-                    RETURNING user_id
-                    """,
-                    (uid, sid),
+            cur.execute(
+                """
+                INSERT INTO free_offer_claims(user_id,service_id,claimed_at)
+                VALUES(%s,%s,CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE
+                SET service_id=EXCLUDED.service_id,order_id=NULL,claimed_at=CURRENT_TIMESTAMP
+                WHERE free_offer_claims.claimed_at <= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+                RETURNING user_id
+                """,
+                (uid, sid),
+            )
+            if not cur.fetchone():
+                conn.rollback()
+                await update.callback_query.answer(
+                    "🎁 يمكنك استلام عرض مجاني واحد كل 24 ساعة. جرّب مجدداً بعد مرور 24 ساعة من آخر عرض.",
+                    show_alert=True,
                 )
-                if not cur.fetchone():
-                    conn.rollback()
-                    await update.callback_query.answer(
-                        "🎁 يمكنك استلام عرض مجاني واحد كل 24 ساعة. جرّب مجدداً بعد مرور 24 ساعة من آخر عرض.",
-                        show_alert=True,
-                    )
-                    return
+                return
             cur.execute(
                 """
                 INSERT INTO orders(user_id,service_id,status,total,delivered_text)
@@ -1619,8 +1672,7 @@ async def claim_free_offer(update, context, srv):
                 (uid, sid),
             )
             oid = cur.fetchone()[0]
-            if uid != ADMIN_ID:
-                cur.execute("UPDATE free_offer_claims SET order_id=%s WHERE user_id=%s", (oid, uid))
+            cur.execute("UPDATE free_offer_claims SET order_id=%s WHERE user_id=%s", (oid, uid))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1628,58 +1680,51 @@ async def claim_free_offer(update, context, srv):
     finally:
         DB_POOL.putconn(conn)
 
-    delivered_parts = []
+    content = (srv[14] or "").strip()
+    link = (srv[15] or "").strip()
+    photo_id = (srv[16] or "").strip()
+    document_id = (srv[17] or "").strip()
     try:
-        await context.bot.send_message(
-            uid,
-            f"🎁 **هدية خاصة لك — {srv[2]}**\n\n"
-            "تم تجهيز عرضك المجاني وتسليمه تلقائياً. استمتع به!",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         if content or link:
-            text = content or "🎁 محتوى العرض المجاني"
+            text = f"🎁 **{srv[2]}**\n\n{content}"
             if link:
                 text += f"\n\n🔗 الرابط: {link}"
             await context.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN)
-            delivered_parts.append("النص/الرابط")
         if photo_id:
             await context.bot.send_photo(uid, photo_id, caption=f"🖼️ صورة عرض: {srv[2]}")
-            delivered_parts.append("الصورة")
         if document_id:
             await context.bot.send_document(uid, document_id, caption=f"📎 ملف عرض: {srv[2]}")
-            delivered_parts.append("الملف")
-        delivered_summary = "، ".join(delivered_parts)
         db_execute(
             "UPDATE orders SET status='مكتمل ✅ - تم تسليم العرض',delivered_text=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s",
-            (f"تم التسليم التلقائي: {delivered_summary}.", oid),
+            ("تم تسليم النص والرابط والصورة والملف تلقائياً.", oid),
         )
-        log_operation(uid, "free_offer_auto_delivered", f"order={oid};service={sid};content={delivered_summary}")
+        log_operation(uid, "free_offer_claimed", f"order={oid};service={sid}")
         await send_or_edit(
             update,
-            "✅ **تم تسليم هديتك بنجاح**\n\n"
-            "ستجد محتوى العرض في الرسائل التي أرسلها لك البوت الآن.\n"
+            "✅ **تم استلام العرض المجاني بنجاح**\n\n"
+            "أرسل البوت لك النص والرابط والصورة والملف في رسائل منفصلة.\n"
             "يمكنك استلام عرض مجاني جديد بعد مرور 24 ساعة من آخر مطالبة.",
             InlineKeyboardMarkup([
                 [green_button("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],
                 [red_button("🏠 الرئيسية", callback_data="main")],
             ]),
         )
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"✅ **تم تسليم عرض مجاني تلقائياً #{oid}**\n\n"
-            f"👤 العميل: {update.effective_user.full_name}\n"
-            f"🆔 `{uid}`\n"
-            f"🛒 العرض: {srv[2]}\n"
-            f"📦 المحتوى المرسل: {delivered_summary}",
-            parse_mode=ParseMode.MARKDOWN,
-        )
     except TelegramError as exc:
-        log.warning("Free offer automatic delivery failed for order %s: %s", oid, exc)
+        log.warning("Free offer delivery failed for order %s: %s", oid, exc)
         await send_or_edit(
             update,
-            "⚠️ تعذر إرسال محتوى العرض تلقائياً بسبب مشكلة مؤقتة في تيليجرام. حاول مرة أخرى لاحقاً.",
-            InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]),
+            "⚠️ تم تسجيل طلب العرض المجاني، لكن تعذر تسليم أحد المرفقات تلقائياً. ستراجعه الإدارة.",
+            InlineKeyboardMarkup([
+                [green_button("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],
+                [red_button("🏠 الرئيسية", callback_data="main")],
+            ]),
         )
+    await context.bot.send_message(
+        ADMIN_ID,
+        f"🎁 **مطالبة عرض مجاني #{oid}**\n\n👤 {update.effective_user.full_name}\n🆔 `{uid}`\n🛒 {srv[2]}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[green_button("📄 فتح الطلب", callback_data=f"adm:order:{oid}")]]),
+    )
 
 
 async def request_order_confirmation(update, context):
@@ -1708,6 +1753,74 @@ async def finalize_customer_order(update, context):
     email = context.user_data.get("order_email", "")
     note = context.user_data.get("order_note", "")
     phone = context.user_data.get("order_phone", "")
+
+    # External provider order: use B-Fix sale price, never the provider price.
+    service_mode = db_execute("SELECT delivery_mode FROM services WHERE id=%s", (sid,), fetch=True)[0]
+    if service_mode == "external":
+        mapping = db_execute(
+            "SELECT provider_service_id FROM external_service_map WHERE service_id=%s", (sid,), fetch=True
+        )
+        if not mapping:
+            await send_or_edit(update, "❌ إعداد المورد لهذه الخدمة غير مكتمل.", InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]))
+            return
+        provider_service_id = mapping[0]
+        conn = DB_POOL.getconn()
+        oid = None
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT balance FROM users WHERE user_id=%s FOR UPDATE", (uid,))
+                row = cur.fetchone()
+                if not row or Decimal(str(row[0])) < price:
+                    conn.rollback()
+                    await send_or_edit(update, "❌ رصيدك غير كافٍ.", InlineKeyboardMarkup([[InlineKeyboardButton("💰 تغذية الحساب", callback_data="fund")]]))
+                    return
+                cur.execute("UPDATE users SET balance=balance-%s WHERE user_id=%s", (price, uid))
+                cur.execute(
+                    """INSERT INTO orders(user_id,service_id,status,total,customer_email,customer_note,customer_phone)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (uid, sid, "جارٍ الإرسال للمورد ⏳", price, email, note, phone),
+                )
+                oid = cur.fetchone()[0]
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            DB_POOL.putconn(conn)
+
+        provider_input = "\n".join(x for x in [f"Email: {email}" if email else "", f"Phone: {phone}" if phone else "", note] if x)
+        try:
+            result = external_add_order(provider_service_id, provider_input)
+            provider_order_id = provider_value(result, "order", "order_id", "id")
+            provider_status = str(provider_value(result, "status", default="submitted"))
+            if not provider_order_id:
+                raise RuntimeError("Provider did not return an order ID.")
+            db_execute(
+                "UPDATE orders SET provider_order_id=%s,provider_status=%s,status='قيد التنفيذ ⏳',updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                (str(provider_order_id), provider_status, oid),
+            )
+        except Exception as exc:
+            log.exception("External order failed: %s", exc)
+            conn = DB_POOL.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT status,total,user_id FROM orders WHERE id=%s FOR UPDATE", (oid,))
+                    current = cur.fetchone()
+                    if current and not str(current[0]).startswith("ملغي") and not str(current[0]).startswith("مكتمل"):
+                        cur.execute("UPDATE users SET balance=balance+%s WHERE user_id=%s", (price, uid))
+                        cur.execute("UPDATE orders SET status='ملغي ❌ - فشل المورد',provider_status=%s,provider_refunded=TRUE,updated_at=CURRENT_TIMESTAMP WHERE id=%s", (str(exc)[:500], oid))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                DB_POOL.putconn(conn)
+            await send_or_edit(update, f"❌ تعذر تنفيذ الطلب لدى المورد.\n💰 تمت إعادة {money(price)}$ إلى رصيدك.", InlineKeyboardMarkup([[red_button("🏠 الرئيسية", callback_data="main")]]))
+            return
+
+        log_operation(uid, "external_purchase", f"order={oid};service={sid};provider_order={provider_order_id};price={money(price)}")
+        await send_or_edit(update, f"✅ **تم إرسال طلبك للمورد بنجاح**\n\n🛒 الخدمة: {context.user_data['order_service_name']}\n💵 المبلغ: {money(price)}$\n🆔 رقم الطلب: `{provider_order_id}`\n\n⏳ الحالة: {provider_status}", InlineKeyboardMarkup([[InlineKeyboardButton("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],[red_button("🏠 الرئيسية", callback_data="main")]]), parse_mode=ParseMode.MARKDOWN)
+        return
 
     # Lock one inventory row before charging for stock delivery.
     inventory_row = None
@@ -2065,6 +2178,10 @@ async def admin_panel(update, context):
         ],
         [
             InlineKeyboardButton("💰 شحن رصيد عميل", callback_data="adm:credit_user"),
+            InlineKeyboardButton("➖ خصم رصيد عميل", callback_data="adm:debit_user"),
+        ],
+        [
+            InlineKeyboardButton("🛒 الخدمات الخارجية", callback_data="adm:external"),
             InlineKeyboardButton("🧾 سندات التحويل", callback_data="adm:topups"),
         ],
         [
@@ -2159,7 +2276,7 @@ async def admin_callback(update, context):
         await admin_service_detail(update, int(sid))
     elif data.startswith("service_mode:"):
         _prefix, sid, mode = data.split(":", 2)
-        if mode not in {"manual", "stock"}:
+        if mode not in {"manual", "stock", "external"}:
             await q.answer("❌ طريقة تسليم غير صالحة.", show_alert=True)
             return
         db_execute("UPDATE services SET delivery_mode=%s WHERE id=%s", (mode, int(sid)))
@@ -2213,6 +2330,41 @@ async def admin_callback(update, context):
                 *admin_navigation_rows(),
             ]),
         )
+    elif data == "external":
+        context.user_data.clear()
+        await admin_external_services(update, context, 0)
+    elif data.startswith("external_page:"):
+        await admin_external_services(update, context, int(data.split(":", 1)[1]))
+    elif data.startswith("external_add:"):
+        provider_id = data.split(":", 1)[1]
+        context.user_data.clear()
+        context.user_data["admin_state"] = "external_price"
+        context.user_data["external_provider_id"] = provider_id
+        await q.message.edit_text("💵 أرسل سعر البيع الذي تريده لهذه الخدمة في B-Fix (مثال: 5.00):", reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data="adm:external")], *admin_navigation_rows()]))
+    elif data.startswith("external_status:"):
+        oid = int(data.split(":", 1)[1])
+        row = db_execute("SELECT provider_order_id FROM orders WHERE id=%s", (oid,), fetch=True)
+        if not row or not row[0]:
+            await q.answer("❌ لا يوجد رقم طلب مورد.", show_alert=True)
+            return
+        try:
+            result = external_order_status(row[0])
+            status = str(provider_value(result, "status", default="غير معروف"))
+            db_execute("UPDATE orders SET provider_status=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s", (status, oid))
+            await q.answer(f"الحالة: {status}", show_alert=True)
+            await admin_order_page(update, oid)
+        except Exception as exc:
+            await q.answer("❌ تعذر تحديث الحالة.", show_alert=True)
+    elif data == "debit_user":
+        context.user_data.clear()
+        context.user_data["admin_state"] = "debit_user_id"
+        await q.message.edit_text("➖ أرسل آيدي العميل الذي تريد خصم الرصيد منه.", reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data="adm:home")], *admin_navigation_rows()]))
+    elif data.startswith("external_add_direct:"):
+        provider_id = data.split(":", 1)[1]
+        context.user_data.clear()
+        context.user_data["admin_state"] = "external_price"
+        context.user_data["external_provider_id"] = provider_id
+        await q.message.edit_text("💵 أرسل سعر البيع لهذه الخدمة:", reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data="adm:external")], *admin_navigation_rows()]))
     elif data == "inventory":
         context.user_data.clear()
         await admin_inventory(update)
@@ -2415,6 +2567,36 @@ async def admin_callback(update, context):
         )
 
 
+async def admin_external_services(update, context, page=0):
+    if not external_api_configured():
+        await send_or_edit(update, "🛒 **الخدمات الخارجية**\n\n⚠️ لم يتم إعداد API المورد بعد. أضف EXTERNAL_API_URL وEXTERNAL_API_KEY في Render.", InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]))
+        return
+    try:
+        items = external_services_list()
+    except Exception as exc:
+        log.exception("Unable to fetch external services: %s", exc)
+        await send_or_edit(update, "❌ تعذر جلب خدمات المورد حاليًا. تأكد من إعدادات API والاتصال.", InlineKeyboardMarkup([[red_button("↩️ لوحة المشرف", callback_data="adm:home")]]))
+        return
+    page_size = 10
+    start = max(0, page) * page_size
+    chunk = items[start:start + page_size]
+    text = f"🛒 **الخدمات الخارجية**\n\nعدد الخدمات التي أعادها المورد: **{len(items)}**\nالصفحة: {page + 1}\n\n"
+    keyboard = []
+    for item in chunk:
+        pid = str(provider_value(item, "service", "id", "service_id"))
+        name = str(provider_value(item, "name", "title", default="خدمة بدون اسم"))
+        price = provider_value(item, "price", "rate", default="—")
+        if not pid:
+            continue
+        keyboard.append([green_button(f"➕ {name[:38]} | ${price}", callback_data=f"adm:external_add:{pid}")])
+    if page > 0:
+        keyboard.append([InlineKeyboardButton("⬅️ السابق", callback_data=f"adm:external_page:{page-1}")])
+    if start + page_size < len(items):
+        keyboard.append([InlineKeyboardButton("➡️ التالي", callback_data=f"adm:external_page:{page+1}")])
+    keyboard.append([red_button("↩️ لوحة المشرف", callback_data="adm:home")])
+    await send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
+
+
 async def admin_services(update):
     rows = db_execute(
         """
@@ -2469,7 +2651,9 @@ async def admin_service_detail(update, sid):
         fetch=True,
     )[0]
     status = "🟢 ظاهرة للعميل" if row[11] else "🔴 مؤرشفة ومخفية"
-    mode = "📦 تسليم من المخزون" if row[7] == "stock" else "🛠️ تنفيذ يدوي"
+    mode = "📦 تسليم من المخزون" if row[7] == "stock" else ("🌐 API خارجي" if row[7] == "external" else "🛠️ تنفيذ يدوي")
+    provider_row = db_execute("SELECT provider_service_id,provider_price FROM external_service_map WHERE service_id=%s", (sid,), fetch=True)
+    provider_line = f"🌐 Service ID المورد: `{provider_row[0]}`\n💰 تكلفة المورد: **{money(provider_row[1])}$**\n" if provider_row else ""
     text = (
         f"🧩 **تفاصيل الخدمة #{row[0]}**\n\n"
         f"📌 الاسم: **{row[1]}**\n"
@@ -2478,6 +2662,7 @@ async def admin_service_detail(update, sid):
         f"⏳ {'مدة الإيجار' if row[2] == 'rentals' else 'مدة الاشتراك'}: {row[4] or 'غير محددة'}\n"
         f"⚡ {'وقت تسليم بيانات الإيجار' if row[2] == 'rentals' else 'مدة التفعيل'}: {row[5] or 'غير محددة'}\n"
         f"💵 السعر: **{money(row[6])}$**\n"
+        f"{provider_line}"
         f"🚚 طريقة التسليم: {mode}\n"
         f"📦 الأكواد المتاحة: {stock}\n"
         f"📧 طلب إيميل: {'نعم ✅' if row[8] else 'لا ❌'}\n"
@@ -3217,6 +3402,89 @@ async def admin_text(update, context):
 
     state = context.user_data.get("admin_state")
     text = update.message.text.strip()
+
+    if state == "debit_user_id":
+        if not text.isdigit() or int(text) <= 0:
+            await update.message.reply_text("❌ أرسل آيدي تيليجرام رقمي صحيح للعميل.")
+            return
+        row = get_user(int(text))
+        if not row:
+            await update.message.reply_text("❌ لا يوجد عميل بهذا الآيدي.")
+            return
+        context.user_data["debit_target_user_id"] = int(text)
+        context.user_data["admin_state"] = "debit_user_amount"
+        await update.message.reply_text(f"👤 العميل: {row[1]}\n💵 الرصيد الحالي: {money(row[2])}$\n\nأرسل مبلغ الخصم:")
+        return
+
+    if state == "debit_user_amount":
+        try:
+            amount = Decimal(text)
+            if amount <= 0:
+                raise InvalidOperation
+        except Exception:
+            await update.message.reply_text("❌ أرسل مبلغًا رقميًا أكبر من صفر.")
+            return
+        target = context.user_data.get("debit_target_user_id")
+        conn = DB_POOL.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name,balance FROM users WHERE user_id=%s FOR UPDATE", (target,))
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback(); await update.message.reply_text("❌ العميل غير موجود."); return
+                balance = Decimal(str(row[1]))
+                if balance < amount:
+                    conn.rollback(); await update.message.reply_text(f"❌ الرصيد غير كافٍ. الرصيد الحالي: {money(balance)}$"); return
+                cur.execute("UPDATE users SET balance=balance-%s WHERE user_id=%s", (amount, target))
+                new_balance = balance - amount
+            conn.commit()
+        except Exception:
+            conn.rollback(); raise
+        finally:
+            DB_POOL.putconn(conn)
+        log_operation(target, "admin_manual_debit", f"amount={money(amount)};new_balance={money(new_balance)}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text(f"✅ تم خصم {money(amount)}$ من حساب {row[0]}.\n💵 الرصيد الجديد: {money(new_balance)}$")
+        try:
+            await context.bot.send_message(target, f"➖ **تم تعديل رصيد حسابك من الإدارة**\n\nالمبلغ المخصوم: **{money(amount)}$**\nرصيدك الجديد: **{money(new_balance)}$**", parse_mode=ParseMode.MARKDOWN)
+        except TelegramError:
+            pass
+        await admin_panel(update, context)
+        return
+
+    if state == "external_price":
+        try:
+            sale_price = Decimal(text)
+            if sale_price < 0:
+                raise InvalidOperation
+        except Exception:
+            await update.message.reply_text("❌ أرسل سعرًا رقميًا صحيحًا (مثال: 5.00).")
+            return
+        pid = context.user_data.get("external_provider_id")
+        try:
+            items = external_services_list()
+            item = next((x for x in items if str(provider_value(x, "service", "id", "service_id")) == str(pid)), None)
+        except Exception:
+            item = None
+        if not item:
+            await update.message.reply_text("❌ لم أجد الخدمة في قائمة المورد.")
+            context.user_data.clear(); return
+        name = str(provider_value(item, "name", "title", default="خدمة خارجية"))
+        provider_price = Decimal(str(provider_value(item, "price", "rate", default="0") or "0"))
+        existing = db_execute("SELECT service_id FROM external_service_map WHERE provider_service_id=%s", (pid,), fetch=True)
+        if existing:
+            db_execute("UPDATE services SET price=%s,name=%s,active=TRUE WHERE id=%s", (sale_price, name, existing[0]))
+            db_execute("UPDATE external_service_map SET provider_price=%s,provider_name=%s,provider_active=TRUE,last_synced_at=CURRENT_TIMESTAMP WHERE service_id=%s", (provider_price, name, existing[0]))
+            sid = existing[0]
+        else:
+            row = db_execute("INSERT INTO services(category_key,name,description,price,delivery_mode,active) VALUES('subscriptions',%s,%s,%s,'external',TRUE) RETURNING id", (name, f"خدمة خارجية من المورد\nService ID: {pid}", sale_price), fetch=True)
+            sid = row[0]
+            db_execute("INSERT INTO external_service_map(service_id,provider_service_id,provider_price,provider_name) VALUES(%s,%s,%s,%s)", (sid,pid,provider_price,name))
+        log_operation(None, "external_service_added", f"service={sid};provider={pid};provider_price={provider_price};sale_price={sale_price}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text(f"✅ تمت إضافة الخدمة الخارجية\n\n📌 {name}\n🆔 {pid}\n💰 سعر المورد: ${provider_price}\n💵 سعر B-Fix: ${sale_price}")
+        await admin_external_services(update, context, 0)
+        return
 
     if state == "credit_user_id":
         if not text.isdigit() or int(text) <= 0:
