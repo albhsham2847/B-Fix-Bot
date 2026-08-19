@@ -444,6 +444,7 @@ def init_db():
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_photo_file_id TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_document_file_id TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS name_entities_json TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS service_icon_custom_emoji_id TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_content_text TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_content_link TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_photo_file_id TEXT DEFAULT ''",
@@ -640,6 +641,22 @@ def custom_emoji_entities_from_message(message):
             "custom_emoji_id": str(emoji_id),
         })
     return json.dumps(found, ensure_ascii=False) if found else ""
+
+
+def custom_emoji_id_from_input(message, raw_text):
+    """Return a Custom Emoji ID from a real entity or a numeric ID pasted by an admin."""
+    value = (raw_text or "").strip()
+    # Telegram custom emoji IDs are decimal identifiers. Keep the value as text to avoid integer overflow.
+    if value.isdigit() and 5 <= len(value) <= 25:
+        return value
+    entities_json = custom_emoji_entities_from_message(message)
+    if not entities_json:
+        return ""
+    try:
+        parsed = json.loads(entities_json)
+        return str(parsed[0].get("custom_emoji_id", "")) if parsed else ""
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return ""
 
 
 def custom_emoji_entities_from_json(value):
@@ -1326,7 +1343,7 @@ async def show_service(update, sid):
         """
         SELECT id,category_key,name,description,subscription_duration,
                activation_time,price,delivery_mode,needs_email,needs_note,
-               needs_phone,pre_purchase_message,name_entities_json
+               needs_phone,pre_purchase_message,name_entities_json,service_icon_custom_emoji_id
         FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
         """,
         (sid,),
@@ -1349,7 +1366,18 @@ async def show_service(update, sid):
     duration_label = "مدة الإيجار" if srv[1] == "rentals" else "مدة الاشتراك"
     activation_label = "وقت تسليم بيانات الإيجار" if srv[1] == "rentals" else "مدة التفعيل/التسليم"
     service_entities = custom_emoji_entities_from_json(srv[12] if len(srv) > 12 else "")
-    if service_entities:
+    icon_id = (srv[13] or "").strip() if len(srv) > 13 else ""
+    if icon_id:
+        # A generic visible placeholder lets Telegram render the pasted custom ID without altering the service name.
+        service_entities = [MessageEntity(type="custom_emoji", offset=0, length=1, custom_emoji_id=icon_id)]
+        text = (
+            f"✨ {srv[2]}\n\n"
+            f"📝 الوصف: {srv[3] or 'غير محدد'}\n"
+            f"⏳ **{duration_label}:** {srv[4] or 'حسب الخدمة'}\n"
+            f"⚡ **{activation_label}:** {srv[5] or 'حسب الخدمة'}\n"
+            f"💵 السعر: {money(srv[6])}$\n"
+        )
+    elif service_entities:
         text = (
             f"{srv[2]}\n\n"
             f"📝 الوصف: {srv[3] or 'غير محدد'}\n"
@@ -3002,7 +3030,7 @@ async def admin_callback(update, context):
         prompts = {
             "name": "✏️ أرسل الاسم الجديد للخدمة:",
             "description": "📝 أرسل الوصف الجديد للخدمة:",
-            "emoji": "🎞️ أرسل اسم الخدمة أو رمز Custom Emoji المتحرك في رسالة واحدة، أو أرسل - لمسحه.",
+            "emoji": "🎞️ أرسل Custom Emoji متحركاً، أو أرسل custom_emoji_id الرقمي، أو أرسل - لمسحه.",
             "price": "💵 أرسل السعر الجديد بالأرقام فقط، مثال: 5.50",
             "duration": "⏳ أرسل مدة الاشتراك الجديدة، أو اكتب: غير محدد",
             "activation": "⚡ أرسل مدة التفعيل أو التسليم الجديدة، أو اكتب: غير محدد",
@@ -3255,7 +3283,7 @@ async def admin_callback(update, context):
         context.user_data["admin_state"] = "button_emoji"
         context.user_data["edit_button_key"] = key
         await q.message.edit_text(
-            "🎞️ أرسل Custom Emoji متحركاً وحده من لوحة الإيموجيات الخاصة، أو أرسل - لمسحه.",
+            "🎞️ أرسل Custom Emoji متحركاً من Telegram أو أرسل custom_emoji_id الرقمي، أو أرسل - لمسحه.",
             reply_markup=InlineKeyboardMarkup([
                 [red_button("🚫 إلغاء", callback_data="adm:buttons")],
                 *admin_navigation_rows(),
@@ -4704,13 +4732,23 @@ async def admin_text(update, context):
             return
         if text == "-":
             entity_json = ""
+            icon_id = ""
         else:
-            entity_json = custom_emoji_entities_from_message(update.message)
-            if not entity_json:
-                await update.message.reply_text("❌ أرسل رسالة تحتوي Custom Emoji متحركاً، أو أرسل - لمسحه.")
+            icon_id = custom_emoji_id_from_input(update.message, text)
+            if not icon_id:
+                await update.message.reply_text(
+                    "❌ أرسل Custom Emoji متحركاً من Telegram أو custom_emoji_id رقمياً، أو أرسل - لمسحه."
+                )
                 return
-        db_execute("UPDATE services SET name_entities_json=%s WHERE id=%s", (entity_json, sid))
-        log_operation(None, "service_custom_emoji_updated", f"service={sid};cleared={not bool(entity_json)}", ADMIN_ID)
+            # A pasted ID is rendered as an independent icon. A sent entity keeps its original name placement.
+            entity_json = custom_emoji_entities_from_message(update.message)
+            if entity_json:
+                icon_id = ""
+        db_execute(
+            "UPDATE services SET name_entities_json=%s,service_icon_custom_emoji_id=%s WHERE id=%s",
+            (entity_json, icon_id, sid),
+        )
+        log_operation(None, "service_custom_emoji_updated", f"service={sid};cleared={not bool(entity_json or icon_id)}", ADMIN_ID)
         context.user_data.clear()
         await update.message.reply_text("✅ تم تحديث الإيموجي المتحرك للخدمة.")
         return
@@ -5028,15 +5066,11 @@ async def admin_text(update, context):
         if text == "-":
             icon_id = ""
         else:
-            entities = custom_emoji_entities_from_message(update.message)
-            if not entities:
-                await update.message.reply_text("❌ أرسل Custom Emoji متحركاً من لوحة Telegram، أو أرسل - لمسحه.")
-                return
-            try:
-                parsed = json.loads(entities)
-                icon_id = str(parsed[0]["custom_emoji_id"])
-            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
-                await update.message.reply_text("❌ تعذر قراءة Custom Emoji. أرسله وحده مرة أخرى.")
+            icon_id = custom_emoji_id_from_input(update.message, text)
+            if not icon_id:
+                await update.message.reply_text(
+                    "❌ أرسل Custom Emoji متحركاً من Telegram أو custom_emoji_id رقمياً، أو أرسل - لمسحه."
+                )
                 return
         db_execute("UPDATE custom_buttons SET icon_custom_emoji_id=%s WHERE btn_key=%s", (icon_id, key))
         log_operation(None, "button_custom_emoji_updated", f"button={key};cleared={not bool(icon_id)}", ADMIN_ID)
