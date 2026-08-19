@@ -265,6 +265,16 @@ def init_db():
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS admin_managers (
+            user_id BIGINT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
+            username TEXT DEFAULT '',
+            added_by BIGINT NOT NULL,
+            added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            active BOOLEAN NOT NULL DEFAULT TRUE
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS categories (
             key TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -814,8 +824,23 @@ def maintenance_active():
     return get_setting("maintenance", "0") == "1"
 
 
+def is_primary_admin(user_id):
+    return int(user_id or 0) == ADMIN_ID
+
+
 def is_admin(user_id):
-    return user_id == ADMIN_ID
+    if is_primary_admin(user_id):
+        return True
+    try:
+        row = db_execute(
+            "SELECT 1 FROM admin_managers WHERE user_id=%s AND active=TRUE",
+            (int(user_id),),
+            fetch=True,
+        )
+        return bool(row)
+    except Exception:
+        logger.exception("تعذر التحقق من المدير الثانوي")
+        return False
 
 
 async def allowed(update, context, admin_ok=False):
@@ -1164,6 +1189,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "admin":
         await admin_panel(update, context)
+        return
+
+    if data.startswith("adm3:"):
+        await admin_manager_callback(update, context)
         return
 
     if data.startswith("adm:"):
@@ -1697,7 +1726,7 @@ async def finish_regular_service_creation(update, context, photo_file_id="", doc
 
 async def service_media_handler(update, context):
     """Save optional Telegram media for free offers and paid-service delivery."""
-    if update.effective_user.id != ADMIN_ID:
+    if not is_admin(update.effective_user.id):
         return False
     state = context.user_data.get("admin_state")
     message = update.message
@@ -2108,7 +2137,7 @@ async def show_free_offer_wait(update, user_id, sid):
 
 
 async def free_offer_timer(update, context, sid):
-    if update.effective_user.id == ADMIN_ID:
+    if is_admin(update.effective_user.id):
         await send_or_edit(
             update,
             "👑 **وضع المدير**\n\nأنت معفى من قيد العروض المجانية ويمكنك الاستلام للاختبار في أي وقت.",
@@ -2161,7 +2190,7 @@ async def claim_free_offer(update, context, srv):
     conn = DB_POOL.getconn()
     try:
         with conn.cursor() as cur:
-            if uid == ADMIN_ID:
+            if is_admin(uid):
                 cur.execute(
                     """
                     INSERT INTO free_offer_claims(user_id,service_id,claimed_at)
@@ -2234,8 +2263,8 @@ async def claim_free_offer(update, context, srv):
             "UPDATE orders SET status='مكتمل ✅ - تم تسليم العرض',delivered_text=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s",
             ("تم تسليم محتوى العرض المجاني تلقائياً.", oid),
         )
-        log_operation(uid, "free_offer_claimed", f"order={oid};service={sid};admin_exempt={uid == ADMIN_ID}")
-        timing_line = "👑 أنت معفى من القيد بصفتك المدير." if uid == ADMIN_ID else "⏳ يمكنك استلام عرض جديد بعد **6 ساعات** من الآن."
+        log_operation(uid, "free_offer_claimed", f"order={oid};service={sid};admin_exempt={is_admin(uid)}")
+        timing_line = "👑 أنت معفى من القيد بصفتك المدير." if is_admin(uid) else "⏳ يمكنك استلام عرض جديد بعد **6 ساعات** من الآن."
         await send_or_edit(
             update,
             "✅ **تم استلام العرض المجاني بنجاح**\n\n"
@@ -2713,6 +2742,69 @@ async def customer_card_message(update, context):
     return ConversationHandler.END
 
 
+async def admin_managers_panel(update, context):
+    """Primary-admin-only manager list; revocation is a soft deactivation."""
+    if not is_primary_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer("🚫 هذا القسم للمدير الأساسي فقط.", show_alert=True)
+        return
+    rows = db_execute(
+        """
+        SELECT m.user_id, COALESCE(NULLIF(u.name,''), NULLIF(m.name,''), 'غير معروف'),
+               COALESCE(NULLIF(u.username,''), NULLIF(m.username,''), ''), m.added_at
+        FROM admin_managers m
+        LEFT JOIN users u ON u.user_id=m.user_id
+        WHERE m.active=TRUE ORDER BY m.added_at DESC, m.user_id
+        """,
+        fetchall=True,
+    ) or []
+    lines = ["👑 **مدراء البوت الثانويون**", "", "المدير الأساسي محمي ولا يظهر ضمن قائمة الإزالة.", ""]
+    if not rows:
+        lines.append("لا يوجد مدراء ثانويون حالياً.")
+    else:
+        for idx, row in enumerate(rows, 1):
+            username = f"@{row[2]}" if row[2] else "بدون username"
+            lines.append(f"{idx}. 👤 {row[1]} | 🆔 `{row[0]}` | {username} | أضيف: {format_operation_time(row[3])}")
+    keyboard = [[green_button("➕ إضافة مدير بالآيدي", callback_data="adm3:add")]]
+    for row in rows:
+        keyboard.append([red_button(f"🗑️ إزالة {row[0]}", callback_data=f"adm3:remove:{row[0]}")])
+    keyboard.append([red_button("↩️ لوحة الإدارة", callback_data="adm:home")])
+    await send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+
+async def admin_manager_callback(update, context):
+    q = update.callback_query
+    if not is_primary_admin(q.from_user.id):
+        await q.answer("🚫 هذا الأمر متاح للمدير الأساسي فقط.", show_alert=True)
+        return
+    data = q.data[5:]
+    if data == "home":
+        await admin_managers_panel(update, context)
+        return
+    if data == "add":
+        context.user_data.clear()
+        context.user_data["admin_state"] = "admin_manager_add_id"
+        await q.message.edit_text(
+            "➕ أرسل آيدي مستخدم Telegram لإضافته كمدير.\n\n"
+            "يجب أن يكون رقماً فقط. لا ترسل التوكن أو أي سر.",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm3:home")],
+            ]),
+        )
+        return
+    if data.startswith("remove:"):
+        manager_id = int(data.split(":", 1)[1])
+        db_execute(
+            "UPDATE admin_managers SET active=FALSE WHERE user_id=%s AND user_id<>%s",
+            (manager_id, ADMIN_ID),
+        )
+        log_operation(manager_id, "secondary_admin_revoked", "", ADMIN_ID)
+        await q.answer("✅ تمت إزالة صلاحية المدير. سيستخدم البوت كعميل فقط.", show_alert=True)
+        await admin_managers_panel(update, context)
+        return
+    await q.answer("❌ إجراء غير معروف.", show_alert=True)
+
+
 # ---------------------------------------------------------------------------
 # Admin UI
 # ---------------------------------------------------------------------------
@@ -2774,7 +2866,7 @@ async def admin_panel(update, context):
 
 async def admin_callback(update, context):
     q = update.callback_query
-    if q.from_user.id != ADMIN_ID:
+    if not is_admin(q.from_user.id):
         await q.answer("🚫 غير مصرح.", show_alert=True)
         return
 
@@ -4224,7 +4316,7 @@ async def credit_user_balance(user_id, amount):
 
 
 async def admin_text(update, context):
-    if update.effective_user.id != ADMIN_ID:
+    if not is_admin(update.effective_user.id):
         return
 
     state = context.user_data.get("admin_state")
@@ -4311,6 +4403,37 @@ async def admin_text(update, context):
         context.user_data.clear()
         await update.message.reply_text(f"✅ تمت إضافة الخدمة الخارجية\n\n📌 {name}\n🆔 {pid}\n💰 سعر المورد: ${provider_price}\n💵 سعر B-Fix: ${sale_price}")
         await admin_external_services(update, context, 0)
+        return
+
+    if state == "admin_manager_add_id":
+        if not is_primary_admin(update.effective_user.id):
+            context.user_data.clear()
+            await update.message.reply_text("🚫 هذا الإجراء للمدير الأساسي فقط.")
+            return
+        raw_id = text.strip()
+        if not raw_id.isdigit():
+            await update.message.reply_text("❌ أرسل آيدي رقمياً فقط، مثال: 123456789.")
+            return
+        manager_id = int(raw_id)
+        if manager_id == ADMIN_ID:
+            await update.message.reply_text("ℹ️ المدير الأساسي مضاف تلقائياً ولا يحتاج إلى تسجيل.")
+            return
+        existing = get_user(manager_id)
+        name = (existing[1] if existing else "") or "غير معروف"
+        username = (existing[2] if existing and len(existing) > 2 else "") or ""
+        db_execute(
+            """
+            INSERT INTO admin_managers(user_id,name,username,added_by,active)
+            VALUES(%s,%s,%s,%s,TRUE)
+            ON CONFLICT(user_id) DO UPDATE SET name=EXCLUDED.name, username=EXCLUDED.username,
+                added_by=EXCLUDED.added_by, active=TRUE
+            """,
+            (manager_id, name, username, ADMIN_ID),
+        )
+        log_operation(manager_id, "secondary_admin_added", "", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text(f"✅ تمت إضافة الآيدي `{manager_id}` كمدير ثانوي.", parse_mode=ParseMode.MARKDOWN)
+        await admin_managers_panel(update, context)
         return
 
     if state == "credit_user_id":
@@ -4923,6 +5046,13 @@ async def admin_command(update, context):
         await admin_panel(update, context)
 
 
+async def admin3_command(update, context):
+    if is_primary_admin(update.effective_user.id):
+        await admin_managers_panel(update, context)
+    else:
+        await update.message.reply_text("🚫 أمر المدراء متاح للمدير الأساسي فقط.")
+
+
 async def cancel(update, context):
     context.user_data.clear()
     await update.message.reply_text("🚫 تم إلغاء العملية.")
@@ -4938,6 +5068,7 @@ def build_application():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("admin3", admin3_command))
     application.add_handler(CommandHandler("cancel", cancel))
 
     # Customer card flow.
@@ -4952,13 +5083,13 @@ def build_application():
     application.add_handler(
         CallbackQueryHandler(
             callback_router,
-            pattern=r"^(check_sub|main|flowcancel:|free_offer_timer:|cat:|service:|buyconfirm:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
+            pattern=r"^(check_sub|main|flowcancel:|free_offer_timer:|cat:|service:|buyconfirm:|buy:|profile|orders|order:|fund|pay:|receipt_start:|support|about|admin|adm3:|adm:|approve:|reject:|deliver:|done:|cancelorder:)",
         )
     )
 
     # Admin/customer text router.
     async def text_router(update, context):
-        if update.effective_user.id == ADMIN_ID and context.user_data.get("admin_state"):
+        if is_admin(update.effective_user.id) and context.user_data.get("admin_state"):
             await admin_text(update, context)
             return
         await customer_text(update, context)
