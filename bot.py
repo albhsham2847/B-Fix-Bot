@@ -438,6 +438,9 @@ def init_db():
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_content_link TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_photo_file_id TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_document_file_id TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_video_file_id TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_audio_file_id TEXT DEFAULT ''",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS free_offer_note TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS customer_request_prompt TEXT DEFAULT ''",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
@@ -1599,35 +1602,56 @@ async def submit_topup_receipt(update, context, receipt_number="", photo_file_id
     log_operation(user.id, "topup_receipt_submitted", f"receipt={receipt_id};payment={payment_key}")
 
 
-def create_free_offer_service(data, document_file_id=""):
-    """Persist an optional-content free offer at a zero price and return its service id."""
+def create_free_offer_service(data):
+    """Persist a zero-price free offer with optional text, link, file, photo, video, and audio."""
     row = db_execute(
         """
         INSERT INTO services(
             category_key,name,description,subscription_duration,activation_time,
             price,delivery_mode,needs_email,needs_note,needs_phone,active,
-            free_content_text,free_content_link,free_photo_file_id,free_document_file_id,name_entities_json
-        ) VALUES('free',%s,%s,'','',0,'manual',FALSE,FALSE,FALSE,TRUE,%s,%s,%s,%s,%s)
+            free_content_text,free_content_link,free_photo_file_id,free_document_file_id,
+            free_video_file_id,free_audio_file_id,free_offer_note,name_entities_json
+        ) VALUES('free',%s,%s,'','',0,'manual',FALSE,FALSE,FALSE,TRUE,%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING id
         """,
         (
             data["service_name"], data["service_description"],
             data.get("free_content_text", ""), data.get("free_content_link", ""),
-            data.get("free_photo_file_id", ""), document_file_id,
-            data.get("service_name_entities_json", ""),
+            data.get("free_photo_file_id", ""), data.get("free_document_file_id", ""),
+            data.get("free_video_file_id", ""), data.get("free_audio_file_id", ""),
+            data.get("free_offer_note", ""), data.get("service_name_entities_json", ""),
         ),
         fetch=True,
     )
     return row[0]
 
 
-async def finish_free_offer_creation(update, context, document_file_id=""):
-    sid = create_free_offer_service(context.user_data, document_file_id)
+def free_offer_content_markup():
+    return InlineKeyboardMarkup([
+        [green_button("📄 ملف", callback_data="adm:freecontent:file"),
+         green_button("📝 نص", callback_data="adm:freecontent:text")],
+        [green_button("🔗 رابط", callback_data="adm:freecontent:link"),
+         green_button("🖼️ صورة / 🎬 فيديو / 🎧 صوت", callback_data="adm:freecontent:media")],
+        [green_button("✅ إنهاء وحفظ العرض", callback_data="adm:freecontent:finish")],
+        [red_button("🚫 إلغاء", callback_data="adm:services")],
+        *admin_navigation_rows(),
+    ])
+
+
+async def show_free_offer_content_menu(update, context, intro=""):
+    text = intro or "🎁 اختر نوع المحتوى الذي تريد إضافته للعرض المجاني. يمكنك إضافة أكثر من نوع، ثم الضغط على إنهاء وحفظ."
+    await send_or_edit(update, text, free_offer_content_markup())
+
+
+async def finish_free_offer_creation(update, context):
+    sid = create_free_offer_service(context.user_data)
     log_operation(None, "free_offer_created", f"service={sid}", ADMIN_ID)
     context.user_data.clear()
-    await update.message.reply_text(
+    await send_or_edit(
+        update,
         f"✅ تمت إضافة العرض المجاني #{sid}.\n\n"
-        "سيُسلّم تلقائياً للعميل أي نص أو رابط أو صورة أو ملف قمت بإرفاقه."
+        "سيُسلّم المحتوى المختار مباشرةً عند ضغط العميل على شراء العرض.",
+        InlineKeyboardMarkup(admin_navigation_rows()),
     )
 
 
@@ -1678,6 +1702,27 @@ async def service_media_handler(update, context):
     state = context.user_data.get("admin_state")
     message = update.message
 
+    if state == "free_offer_media":
+        if message.photo:
+            context.user_data["free_photo_file_id"] = message.photo[-1].file_id
+        elif message.video:
+            context.user_data["free_video_file_id"] = message.video.file_id
+        elif message.audio:
+            context.user_data["free_audio_file_id"] = message.audio.file_id
+        else:
+            await update.message.reply_text("❌ أرسل صورة أو فيديو أو مقطعاً صوتياً من Telegram.")
+            return True
+        await show_free_offer_content_menu(update, context, "✅ تم حفظ المحتوى. يمكنك إضافة نوع آخر أو إنهاء وحفظ العرض.")
+        return True
+
+    if state == "free_offer_file":
+        if not message.document:
+            await update.message.reply_text("❌ أرسل الملف كمستند Telegram.")
+            return True
+        context.user_data["free_document_file_id"] = message.document.file_id
+        await show_free_offer_content_menu(update, context, "✅ تم حفظ الملف. يمكنك إضافة نوع آخر أو إنهاء وحفظ العرض.")
+        return True
+
     if state == "free_offer_photo":
         if not message.photo:
             await update.message.reply_text("❌ أرسل الصورة كصورة تيليجرام، أو أرسل علامة - لتخطيها.")
@@ -1691,7 +1736,8 @@ async def service_media_handler(update, context):
         if not message.document:
             await update.message.reply_text("❌ أرسل الملف كمستند تيليجرام، أو أرسل علامة - لتخطيه وإنشاء العرض.")
             return True
-        await finish_free_offer_creation(update, context, message.document.file_id)
+        context.user_data["free_document_file_id"] = message.document.file_id
+        await finish_free_offer_creation(update, context)
         return True
 
     if state == "service_add_photo":
@@ -1935,7 +1981,7 @@ async def begin_order(update, context, sid):
                needs_phone,file_id,file_kind,pre_purchase_message,service_content_text,service_content_link,
                service_photo_file_id,service_document_file_id,
                free_content_text,free_content_link,free_photo_file_id,free_document_file_id,
-               customer_request_prompt
+               customer_request_prompt,free_video_file_id,free_audio_file_id,free_offer_note
         FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE
         """,
         (sid,),
@@ -2163,26 +2209,37 @@ async def claim_free_offer(update, context, srv):
     link = (srv[19] or "").strip()
     photo_id = (srv[20] or "").strip()
     document_id = (srv[21] or "").strip()
+    video_id = (srv[23] or "").strip()
+    audio_id = (srv[24] or "").strip()
+    offer_note = (srv[25] or "").strip()
     try:
-        if content or link:
-            message = f"🎁 **{srv[2]}**\n\n{content}"
+        if content or link or offer_note:
+            message = f"🎁 **{srv[2]}**\n\n"
+            if offer_note:
+                message += f"💬 {offer_note}\n\n"
+            if content:
+                message += content
             if link:
                 message += f"\n\n🔗 الرابط: {link}"
             await context.bot.send_message(uid, message, parse_mode=ParseMode.MARKDOWN)
         if photo_id:
-            await context.bot.send_photo(uid, photo_id, caption=f"🖼️ صورة عرض: {srv[2]}")
+            await context.bot.send_photo(uid, photo_id, caption=f"🖼️ صورة العرض: {srv[2]}")
+        if video_id:
+            await context.bot.send_video(uid, video_id, caption=f"🎬 فيديو العرض: {srv[2]}")
+        if audio_id:
+            await context.bot.send_audio(uid, audio_id, caption=f"🎧 صوت العرض: {srv[2]}")
         if document_id:
-            await context.bot.send_document(uid, document_id, caption=f"📎 ملف عرض: {srv[2]}")
+            await context.bot.send_document(uid, document_id, caption=f"📎 ملف العرض: {srv[2]}")
         db_execute(
             "UPDATE orders SET status='مكتمل ✅ - تم تسليم العرض',delivered_text=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s",
-            ("تم تسليم النص والرابط والصورة والملف تلقائياً.", oid),
+            ("تم تسليم محتوى العرض المجاني تلقائياً.", oid),
         )
         log_operation(uid, "free_offer_claimed", f"order={oid};service={sid};admin_exempt={uid == ADMIN_ID}")
         timing_line = "👑 أنت معفى من القيد بصفتك المدير." if uid == ADMIN_ID else "⏳ يمكنك استلام عرض جديد بعد **6 ساعات** من الآن."
         await send_or_edit(
             update,
             "✅ **تم استلام العرض المجاني بنجاح**\n\n"
-            "أرسل البوت النص والرابط والصورة والملف في رسائل منفصلة عند توفرها.\n"
+            "تم تسليم المحتوى المتاح مباشرةً دون انتظار مراجعة الإدارة.\n"
             f"{timing_line}",
             InlineKeyboardMarkup([
                 [green_button("📦 تفاصيل الطلب", callback_data=f"order:{oid}")],
@@ -2202,9 +2259,14 @@ async def claim_free_offer(update, context, srv):
         )
     await context.bot.send_message(
         ADMIN_ID,
-        f"🎁 **مطالبة عرض مجاني #{oid}**\n\n👤 {update.effective_user.full_name}\n🆔 `{uid}`\n🛒 {srv[2]}",
+        f"🎁 **تم تسليم عرض مجاني #{oid}**\n\n"
+        f"👤 الاسم: {update.effective_user.full_name}\n"
+        f"🆔 الآيدي: `{uid}`\n"
+        f"🔗 المستخدم: @{update.effective_user.username or '—'}",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[green_button("📄 فتح الطلب", callback_data=f"adm:order:{oid}")]]),
+        reply_markup=InlineKeyboardMarkup([
+            [green_button("📩 إرسال ملاحظة للعميل", callback_data=f"adm:free_note:{uid}:{oid}")],
+        ]),
     )
 
 
@@ -2838,11 +2900,57 @@ async def admin_callback(update, context):
                 *admin_navigation_rows(),
             ]),
         )
+    elif data == "freecontent:menu":
+        await show_free_offer_content_menu(update, context)
+        return
+    elif data.startswith("freecontent:"):
+        choice = data.split(":", 1)[1]
+        if choice == "finish":
+            if not any(context.user_data.get(k) for k in (
+                "free_content_text", "free_content_link", "free_photo_file_id",
+                "free_document_file_id", "free_video_file_id", "free_audio_file_id",
+            )):
+                await q.answer("أضف محتوى واحداً على الأقل أو ألغِ العملية.", show_alert=True)
+                return
+            await finish_free_offer_creation(update, context)
+            return
+        prompts = {
+            "file": ("free_offer_file", "📄 أرسل الملف كمستند Telegram الآن."),
+            "text": ("free_offer_text", "📝 أرسل النص الذي سيصل للعميل الآن، أو أرسل - لمسحه."),
+            "link": ("free_offer_link", "🔗 أرسل الرابط الآن، أو أرسل - لمسحه."),
+            "media": ("free_offer_media", "🖼️ أرسل صورة أو 🎬 فيديو أو 🎧 مقطعاً صوتياً الآن."),
+        }
+        state_prompt = prompts.get(choice)
+        if not state_prompt:
+            await q.answer("❌ نوع محتوى غير صالح.", show_alert=True)
+            return
+        context.user_data["admin_state"] = state_prompt[0]
+        await q.message.edit_text(
+            state_prompt[1],
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("↩️ أنواع العرض", callback_data="adm:freecontent:menu")],
+                *admin_navigation_rows(),
+            ]),
+        )
+        return
     elif data == "stats":
         await admin_stats(update)
     elif data == "orders":
         context.user_data.clear()
         await admin_orders(update)
+    elif data.startswith("free_note:"):
+        _prefix, target_uid, oid = data.split(":", 2)
+        context.user_data.clear()
+        context.user_data["admin_state"] = "free_offer_admin_note"
+        context.user_data["free_note_target"] = int(target_uid)
+        context.user_data["free_note_order"] = int(oid)
+        await q.message.edit_text(
+            f"📩 أرسل الملاحظة التي تريد إرسالها للعميل صاحب العرض المجاني #{oid}.",
+            reply_markup=InlineKeyboardMarkup([
+                [red_button("🚫 إلغاء", callback_data="adm:home")],
+                *admin_navigation_rows(),
+            ]),
+        )
     elif data.startswith("order:"):
         await admin_order_page(update, int(data.split(":")[1]))
     elif data == "users":
@@ -4410,16 +4518,27 @@ async def admin_text(update, context):
         await update.message.reply_text("📝 أرسل وصف الخدمة:")
         return
 
+    if state in {"free_offer_file", "free_offer_media"}:
+        if text.strip() == "-":
+            await show_free_offer_content_menu(update, context, "تم تخطي هذا النوع. اختر نوعاً آخر أو أنهِ الحفظ.")
+        else:
+            await update.message.reply_text("❌ استخدم زر نوع المحتوى ثم أرسل الملف أو الوسائط المطلوبة.")
+        return
+
     if state == "free_offer_description":
         context.user_data["service_description"] = text[:1800]
-        context.user_data["admin_state"] = "free_offer_text"
-        await update.message.reply_text("📝 أرسل النص الذي سيصل للعميل مع العرض المجاني:")
+        context.user_data["admin_state"] = "free_offer_note"
+        await update.message.reply_text("💬 أرسل ملاحظة اختيارية للعرض، أو أرسل - لتخطيها.")
+        return
+
+    if state == "free_offer_note":
+        context.user_data["free_offer_note"] = "" if text.strip() == "-" else text[:1800]
+        await show_free_offer_content_menu(update, context)
         return
 
     if state == "free_offer_text":
         context.user_data["free_content_text"] = "" if text.strip() == "-" else text[:3500]
-        context.user_data["admin_state"] = "free_offer_link"
-        await update.message.reply_text("🔗 أرسل رابط العرض أو الموقع، أو أرسل علامة: - لتخطيه.")
+        await show_free_offer_content_menu(update, context, "✅ تم حفظ النص. يمكنك إضافة نوع آخر أو إنهاء وحفظ العرض.")
         return
 
     if state == "free_offer_link":
@@ -4428,8 +4547,7 @@ async def admin_text(update, context):
             await update.message.reply_text("❌ أرسل رابطاً يبدأ بـ https:// أو http://، أو أرسل - إذا لا يوجد رابط.")
             return
         context.user_data["free_content_link"] = link
-        context.user_data["admin_state"] = "free_offer_photo"
-        await update.message.reply_text("🖼️ أرسل صورة العرض، أو أرسل علامة: - لتخطي الصورة.", parse_mode=ParseMode.MARKDOWN)
+        await show_free_offer_content_menu(update, context, "✅ تم حفظ الرابط. يمكنك إضافة نوع آخر أو إنهاء وحفظ العرض.")
         return
 
     if state == "free_offer_photo":
@@ -4656,6 +4774,25 @@ async def admin_text(update, context):
         context.user_data.clear()
         return
 
+    if state == "free_offer_admin_note":
+        target_uid = context.user_data.get("free_note_target")
+        oid = context.user_data.get("free_note_order")
+        if not target_uid or not text:
+            await update.message.reply_text("❌ أرسل ملاحظة غير فارغة.")
+            return
+        try:
+            await context.bot.send_message(
+                target_uid,
+                f"📩 **رسالة من إدارة B-Fix**\n\n{text[:3500]}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            log_operation(target_uid, "free_offer_admin_note_sent", f"order={oid}", ADMIN_ID)
+            await update.message.reply_text("✅ تم إرسال الملاحظة إلى العميل.")
+        except TelegramError:
+            await update.message.reply_text("⚠️ تعذر إرسال الملاحظة؛ ربما لم يعد العميل يستقبل الرسائل.")
+        context.user_data.clear()
+        return
+
     if state == "button_text":
         key = context.user_data["edit_button_key"]
         if not text or len(text) > 64:
@@ -4830,6 +4967,7 @@ def build_application():
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_router)
     )
     application.add_handler(MessageHandler(filters.PHOTO, receipt_photo_handler))
+    application.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO, service_media_handler))
     application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
 
     return application
