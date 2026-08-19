@@ -2769,7 +2769,7 @@ async def admin_managers_panel(update, context):
     for row in rows:
         keyboard.append([red_button(f"🗑️ إزالة {row[0]}", callback_data=f"adm3:remove:{row[0]}")])
     keyboard.append([red_button("↩️ لوحة الإدارة", callback_data="adm:home")])
-    await send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    await send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
 
 async def admin_manager_callback(update, context):
