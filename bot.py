@@ -1171,14 +1171,17 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "about":
-        await send_or_edit(
-            update,
-            "✦ **B-Fix Software | متجر الخدمات الرقمية** ✦\n\n"
+        default_description = (
             "نقدّم أدوات وبوكسات للمبرمجين وفنيي السوفت وير، واشتراكات وتفعيلات لخدمات "
             "الذكاء الاصطناعي والتطبيقات والمواقع، وإيجار أدوات لفترات مرنة.\n\n"
             "كما نوفر خدمات VIP مخصصة لتطوير البوتات والمواقع والتطبيقات وتصاميم السوشال ميديا "
             "وحلول الأمن السيبراني المصرح بها، إضافة إلى عروض مجانية تُسلّم تلقائياً.\n\n"
-            "🔒 جميع الطلبات تُتابع عبر نظام منظم وسجل عمليات واضح.",
+            "🔒 جميع الطلبات تُتابع عبر نظام منظم وسجل عمليات واضح."
+        )
+        description = get_setting("bot_description", default_description).strip() or default_description
+        await send_or_edit(
+            update,
+            "✦ **B-Fix Software | متجر الخدمات الرقمية** ✦\n\n" + description,
             InlineKeyboardMarkup([
                 [InlineKeyboardButton("🌐 واتساب", url=WHATSAPP_LINK)],
                 [InlineKeyboardButton("🛠️ الدعم", url=SUPPORT_LINK)],
@@ -2765,11 +2768,78 @@ async def admin_managers_panel(update, context):
         for idx, row in enumerate(rows, 1):
             username = f"@{row[2]}" if row[2] else "بدون username"
             lines.append(f"{idx}. 👤 {row[1]} | 🆔 `{row[0]}` | {username} | أضيف: {format_operation_time(row[3])}")
-    keyboard = [[green_button("➕ إضافة مدير بالآيدي", callback_data="adm3:add")]]
+    keyboard = [
+        [green_button("➕ إضافة مدير بالآيدي", callback_data="adm3:add")],
+        [green_button("📝 تعديل الوصف", callback_data="adm3:descriptions")],
+    ]
     for row in rows:
         keyboard.append([red_button(f"🗑️ إزالة {row[0]}", callback_data=f"adm3:remove:{row[0]}")])
     keyboard.append([red_button("↩️ لوحة الإدارة", callback_data="adm:home")])
     await send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(keyboard))
+
+
+async def admin_description_panel(update, context):
+    if not is_primary_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer("🚫 هذا القسم للمدير الأساسي فقط.", show_alert=True)
+        return
+    await send_or_edit(
+        update,
+        "📝 **تعديل الوصف**\n\nاختر ما تريد تعديله. تغيير الوصف لا يؤثر في الأسعار أو المخزون أو الطلبات.",
+        InlineKeyboardMarkup([
+            [green_button("🤖 وصف البوت العام", callback_data="adm3:desc_bot")],
+            [green_button("🛍️ وصف خدمة", callback_data="adm3:desc_services")],
+            [red_button("↩️ قائمة المدراء", callback_data="adm3:home")],
+        ]),
+    )
+
+
+async def admin_description_categories(update, context):
+    rows = db_execute(
+        "SELECT key,title FROM categories WHERE COALESCE(active,TRUE)=TRUE ORDER BY sort_order,key",
+        fetchall=True,
+    ) or []
+    keyboard = [[green_button(f"📂 {row[1]}", callback_data=f"adm3:desc_cat:{row[0]}:0")] for row in rows]
+    keyboard.append([red_button("↩️ تعديل الوصف", callback_data="adm3:descriptions")])
+    await send_or_edit(update, "🛍️ اختر القسم الذي يحتوي الخدمة:", InlineKeyboardMarkup(keyboard))
+
+
+async def admin_description_services(update, context, category, page=0):
+    page = max(0, int(page))
+    total_row = db_execute(
+        "SELECT COUNT(*) FROM services WHERE category_key=%s AND COALESCE(active,TRUE)=TRUE",
+        (category,), fetch=True,
+    )
+    total = int(total_row[0] or 0) if total_row else 0
+    rows = db_execute(
+        """
+        SELECT id,name FROM services
+        WHERE category_key=%s AND COALESCE(active,TRUE)=TRUE
+        ORDER BY id DESC LIMIT 25 OFFSET %s
+        """,
+        (category, page * 25), fetchall=True,
+    ) or []
+    if not rows:
+        await send_or_edit(
+            update,
+            "لا توجد خدمات نشطة في هذا القسم.",
+            InlineKeyboardMarkup([[red_button("↩️ الأقسام", callback_data="adm3:desc_services")]]),
+        )
+        return
+    keyboard = [[green_button(f"📝 {row[1][:45]}", callback_data=f"adm3:desc_service:{row[0]}")] for row in rows]
+    nav = []
+    if page > 0:
+        nav.append(green_button("◀️ السابق", callback_data=f"adm3:desc_cat:{category}:{page - 1}"))
+    if (page + 1) * 25 < total:
+        nav.append(green_button("التالي ▶️", callback_data=f"adm3:desc_cat:{category}:{page + 1}"))
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([red_button("↩️ الأقسام", callback_data="adm3:desc_services")])
+    await send_or_edit(
+        update,
+        f"🛍️ اختر خدمة لتعديل وصفها. الصفحة {page + 1} من {max(1, (total + 24) // 25)}.",
+        InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def admin_manager_callback(update, context):
@@ -2780,6 +2850,45 @@ async def admin_manager_callback(update, context):
     data = q.data[5:]
     if data == "home":
         await admin_managers_panel(update, context)
+        return
+    if data == "descriptions":
+        await admin_description_panel(update, context)
+        return
+    if data == "desc_bot":
+        context.user_data.clear()
+        context.user_data["admin_state"] = "admin3_bot_description"
+        current = get_setting("bot_description", "")
+        await q.message.edit_text(
+            "🤖 أرسل وصف البوت العام الجديد الآن.\n\n"
+            "يظهر هذا النص في زر «عن المتجر». الحد الأقصى 3500 حرف.\n"
+            f"الوصف الحالي: {current or 'الوصف الافتراضي'}",
+            reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data="adm3:descriptions")]]),
+        )
+        return
+    if data == "desc_services":
+        await admin_description_categories(update, context)
+        return
+    if data.startswith("desc_cat:"):
+        _prefix, category, page = data.split(":", 2)
+        await admin_description_services(update, context, category, page)
+        return
+    if data.startswith("desc_service:"):
+        sid = int(data.split(":", 1)[1])
+        row = db_execute(
+            "SELECT id,name,description FROM services WHERE id=%s AND COALESCE(active,TRUE)=TRUE",
+            (sid,), fetch=True,
+        )
+        if not row:
+            await q.answer("❌ الخدمة غير موجودة أو موقوفة.", show_alert=True)
+            return
+        context.user_data.clear()
+        context.user_data["admin_state"] = "admin3_service_description"
+        context.user_data["admin3_service_id"] = int(row[0])
+        await q.message.edit_text(
+            f"📝 أرسل الوصف الجديد لخدمة: {row[1]}\n\n"
+            f"الوصف الحالي:\n{row[2] or '—'}",
+            reply_markup=InlineKeyboardMarkup([[red_button("🚫 إلغاء", callback_data="adm3:descriptions")]]),
+        )
         return
     if data == "add":
         context.user_data.clear()
@@ -4403,6 +4512,44 @@ async def admin_text(update, context):
         context.user_data.clear()
         await update.message.reply_text(f"✅ تمت إضافة الخدمة الخارجية\n\n📌 {name}\n🆔 {pid}\n💰 سعر المورد: ${provider_price}\n💵 سعر B-Fix: ${sale_price}")
         await admin_external_services(update, context, 0)
+        return
+
+    if state == "admin3_bot_description":
+        if not is_primary_admin(update.effective_user.id):
+            context.user_data.clear()
+            await update.message.reply_text("🚫 هذا الإجراء للمدير الأساسي فقط.")
+            return
+        if not text or len(text) > 3500:
+            await update.message.reply_text("❌ الوصف فارغ أو أطول من 3500 حرف.")
+            return
+        set_setting("bot_description", text)
+        log_operation(None, "bot_description_updated", "", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text("✅ تم تحديث وصف البوت العام.")
+        return
+
+    if state == "admin3_service_description":
+        if not is_primary_admin(update.effective_user.id):
+            context.user_data.clear()
+            await update.message.reply_text("🚫 هذا الإجراء للمدير الأساسي فقط.")
+            return
+        sid = context.user_data.get("admin3_service_id")
+        if not sid:
+            context.user_data.clear()
+            await update.message.reply_text("⚠️ انتهت جلسة تعديل وصف الخدمة.")
+            return
+        if not text or len(text) > 3500:
+            await update.message.reply_text("❌ الوصف فارغ أو أطول من 3500 حرف.")
+            return
+        exists = db_execute("SELECT id FROM services WHERE id=%s", (sid,), fetch=True)
+        if not exists:
+            context.user_data.clear()
+            await update.message.reply_text("❌ الخدمة لم تعد موجودة.")
+            return
+        db_execute("UPDATE services SET description=%s WHERE id=%s", (text, sid))
+        log_operation(None, "service_description_updated_admin3", f"service={sid}", ADMIN_ID)
+        context.user_data.clear()
+        await update.message.reply_text("✅ تم تحديث وصف الخدمة فقط.")
         return
 
     if state == "admin_manager_add_id":
